@@ -18,6 +18,8 @@ These targets require explicit opt-in and administrator rights:
 - `WindowsUpdate`
 - `DeliveryOptimization`
 - `OldQuarantine`
+- `NetLimiterStats`
+- `VisualStudioPackageCache`
 
 When not elevated, CPanCleaner reports `NeedsAdministrator` and skips the target. The wrapper supports `-Elevate`, which asks Windows UAC to open a new administrator PowerShell process.
 
@@ -68,6 +70,16 @@ C:\ProgramData\Locktime\NetLimiter\5\Stats\nlstats.db
 The target is high risk because deleting it removes NetLimiter historical traffic statistics. It is never selected by `Default`.
 
 Real cleanup requires administrator rights. CPanCleaner attempts to stop `NLSvc`, delete `nlstats.db`, and restart `NLSvc` when it was originally running. If `NLSvc` is running and cannot be stopped, the database is not removed.
+
+## Visual Studio Package Cache
+
+`VisualStudioPackageCache` targets children under:
+
+```text
+C:\ProgramData\Microsoft\VisualStudio\Packages
+```
+
+The target is high risk because Visual Studio setup may need cached packages for repair, modify, or uninstall operations. It is never selected by `Default`. CPanCleaner preserves the parent directory and only removes children inside that explicit cache root.
 
 ## Git And Conda Diagnostics
 

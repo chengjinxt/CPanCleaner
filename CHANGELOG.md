@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 - 2026-07-11
+
+- Added explicit `VisualStudioPackageCache` include target for `C:\ProgramData\Microsoft\VisualStudio\Packages`.
+- Added double-click batch entrypoints migrated from the prototype project.
+- Updated aggressive batch cleanup to include Windows Update, Delivery Optimization, old quarantine directories, NetLimiter statistics, and Visual Studio package cache targets.
+- Updated README, safety notes, and static safety tests for prototype parity.
+
 ## 0.2.0 - 2026-07-11
 
 - Added explicit `NetLimiterStats` include target for `C:\ProgramData\Locktime\NetLimiter\5\Stats\nlstats.db`.

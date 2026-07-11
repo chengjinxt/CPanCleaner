@@ -1,6 +1,6 @@
 Set-StrictMode -Version 2.0
 
-$script:CleanerVersion = '0.2.0'
+$script:CleanerVersion = '0.3.0'
 
 function Get-CPanSystemDrive {
     $drive = $env:SystemDrive
@@ -314,6 +314,18 @@ function Get-CPanStaticTargets {
         -RequiresAdmin $true `
         -UseAgeFilter $false `
         -Description 'NetLimiter traffic history database. Removing it frees space but loses historical traffic statistics.'
+
+    $targets += New-CPanTarget `
+        -Id 'VisualStudioPackageCache' `
+        -Name 'Visual Studio installer package cache' `
+        -Path "$systemDrive\ProgramData\Microsoft\VisualStudio\Packages" `
+        -Kind 'DirectoryChildren' `
+        -Risk 'High' `
+        -Category 'VisualStudioPackageCache' `
+        -Default $false `
+        -RequiresAdmin $true `
+        -UseAgeFilter $false `
+        -Description 'Visual Studio installer package cache. Removing it can free significant space but may affect repair, modify, or uninstall operations.'
 
     return $targets
 }
@@ -935,7 +947,7 @@ function Invoke-CPanCleaner {
         [ValidateSet('Scan', 'Clean', 'Diagnose')]
         [string] $Action = 'Scan',
 
-        [ValidateSet('Default', 'Temp', 'WindowsUpdate', 'DeliveryOptimization', 'RecycleBin', 'OldQuarantine', 'NetLimiterStats', 'All')]
+        [ValidateSet('Default', 'Temp', 'WindowsUpdate', 'DeliveryOptimization', 'RecycleBin', 'OldQuarantine', 'NetLimiterStats', 'VisualStudioPackageCache', 'All')]
         [string[]] $Include = @('Default'),
 
         [switch] $Apply,

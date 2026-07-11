@@ -30,7 +30,7 @@ CPanCleaner 的实现由四层组成：
    所有可清理位置都由模块内的目标定义注册，包含 `Id`、路径、风险级别、是否默认、是否需要管理员、是否使用时间过滤等元数据。
 
 2. 选择策略
-   `-Include Default` 只选择低风险默认目标；`WindowsUpdate`、`DeliveryOptimization`、`RecycleBin`、`OldQuarantine`、`NetLimiterStats` 等目标必须显式选择；`All` 只表示选择所有已注册目标，不表示绕过安全策略。
+   `-Include Default` 只选择低风险默认目标；`WindowsUpdate`、`DeliveryOptimization`、`RecycleBin`、`OldQuarantine`、`NetLimiterStats`、`VisualStudioPackageCache` 等目标必须显式选择；`All` 只表示选择所有已注册目标，不表示绕过安全策略。
 
 3. 路径安全检查
    删除前会检查候选路径是否位于目标允许根目录之内，并阻止进入敏感目录。工具清理缓存目录的“子项”，不删除父目录本身；对 NetLimiter 只允许删除明确的 `nlstats.db` 文件。
@@ -49,6 +49,7 @@ CPanCleaner 的实现由四层组成：
 | `RecycleBin` | 否 | High | 普通权限 | 清空 C 盘回收站，会永久移除用户已删除文件。 |
 | `OldQuarantine` | 否 | Medium | 管理员 | 删除历史维护产生的已知隔离目录。 |
 | `NetLimiterStats` | 否 | High | 管理员 | 删除 `C:\ProgramData\Locktime\NetLimiter\5\Stats\nlstats.db`。会丢失 NetLimiter 历史流量统计。 |
+| `VisualStudioPackageCache` | 否 | High | 管理员 | 清理 `C:\ProgramData\Microsoft\VisualStudio\Packages` 的子项。可释放大量空间，但可能影响 Visual Studio 修复、修改或卸载。 |
 | `All` | 否 | Mixed | 视目标而定 | 选择全部已注册目标，仍遵守权限和安全检查。 |
 
 ## 开发环境要求
@@ -74,6 +75,7 @@ CPanCleaner 的实现由四层组成：
 - Delivery Optimization 缓存。
 - 旧隔离目录。
 - NetLimiter 历史流量统计数据库。
+- Visual Studio 安装包缓存。
 
 可用 `-Elevate` 触发 UAC：
 
@@ -133,6 +135,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Cl
 
 执行时工具会尝试停止 `NLSvc`，删除 `nlstats.db`，再按原运行状态重启 `NLSvc`。删除该数据库会释放空间，但会丢失 NetLimiter 历史流量统计。
 
+预览 Visual Studio 安装包缓存清理：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include VisualStudioPackageCache -DryRun
+```
+
+执行 Visual Studio 安装包缓存清理：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include VisualStudioPackageCache -Apply -Elevate
+```
+
+该目标只清理 `C:\ProgramData\Microsoft\VisualStudio\Packages` 下的子项并保留父目录。删除后可能导致 Visual Studio 后续修复、修改或卸载时需要重新下载安装包。
+
 运行 Git fsmonitor / Conda 残留诊断：
 
 ```powershell
@@ -144,6 +160,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Di
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Scan -Include All -Json
 ```
+
+## 批处理入口
+
+仓库提供了几个双击可用的批处理入口，适合临时维护时快速执行：
+
+| 文件 | 行为 | 说明 |
+| --- | --- | --- |
+| `Run-Scan.bat` | 扫描默认低风险目标 | 不删除文件。 |
+| `Run-Clean-Safe.bat` | 执行默认低风险清理 | 只处理默认目标。 |
+| `Run-Clean-NetLimiter.bat` | 清理 NetLimiter 历史流量统计数据库 | 会触发 UAC；会丢失 NetLimiter 历史流量统计。 |
+| `Run-Clean-Aggressive.bat` | 清理 Windows Update、Delivery Optimization、旧隔离目录、NetLimiter 统计库和 Visual Studio 包缓存 | 会触发 UAC；不包含回收站，避免误删用户已删除文件。 |
 
 ## 日志
 
@@ -160,6 +187,7 @@ logs\cpancleaner-YYYYMMDD-HHMMSS-xxxxxxxx.log
 - 管理员目标跳过原因。
 - Windows Update 服务停止尝试。
 - NetLimiter 服务停止和恢复尝试。
+- Visual Studio 包缓存清理结果。
 - 删除成功或失败的路径。
 
 `logs\*.log` 和 `logs\*.json` 默认不提交到 Git；仓库仅保留 `logs\.gitkeep`。
@@ -194,6 +222,12 @@ NetLimiter dry-run 验证：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include NetLimiterStats -DryRun
+```
+
+Visual Studio 包缓存 dry-run 验证：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include VisualStudioPackageCache -DryRun
 ```
 
 诊断入口验证：
@@ -232,6 +266,8 @@ Windows Update 清理只处理缓存和暂存内容，不删除：
 回收站属于高风险目标，不在默认清理范围内。
 
 NetLimiter 统计数据库属于高风险目标，不在默认清理范围内。CPanCleaner 只允许删除明确的 `nlstats.db` 文件，不清理整个 NetLimiter 目录。
+
+Visual Studio 包缓存属于高风险目标，不在默认清理范围内。CPanCleaner 只清理 `C:\ProgramData\Microsoft\VisualStudio\Packages` 下的子项并保留父目录；清理后 Visual Studio 修复、修改或卸载可能需要重新下载安装包。
 
 ## 版本规范
 
