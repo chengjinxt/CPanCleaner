@@ -57,6 +57,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Sc
 powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include RecycleBin -Apply
 ```
 
+## NetLimiter Statistics
+
+`NetLimiterStats` targets only one file:
+
+```text
+C:\ProgramData\Locktime\NetLimiter\5\Stats\nlstats.db
+```
+
+The target is high risk because deleting it removes NetLimiter historical traffic statistics. It is never selected by `Default`.
+
+Real cleanup requires administrator rights. CPanCleaner attempts to stop `NLSvc`, delete `nlstats.db`, and restart `NLSvc` when it was originally running. If `NLSvc` is running and cannot be stopped, the database is not removed.
+
 ## Git And Conda Diagnostics
 
 `-Action Diagnose` is read-only. It reports:
@@ -66,4 +78,3 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Cl
 - Local repository `core.fsmonitor` and `core.untrackedCache` settings when a repository path is available.
 
 The tool does not kill those processes or rewrite Git configuration automatically.
-

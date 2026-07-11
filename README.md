@@ -30,13 +30,13 @@ CPanCleaner 的实现由四层组成：
    所有可清理位置都由模块内的目标定义注册，包含 `Id`、路径、风险级别、是否默认、是否需要管理员、是否使用时间过滤等元数据。
 
 2. 选择策略
-   `-Include Default` 只选择低风险默认目标；`WindowsUpdate`、`DeliveryOptimization`、`RecycleBin`、`OldQuarantine` 等目标必须显式选择；`All` 只表示选择所有已注册目标，不表示绕过安全策略。
+   `-Include Default` 只选择低风险默认目标；`WindowsUpdate`、`DeliveryOptimization`、`RecycleBin`、`OldQuarantine`、`NetLimiterStats` 等目标必须显式选择；`All` 只表示选择所有已注册目标，不表示绕过安全策略。
 
 3. 路径安全检查
-   删除前会检查候选路径是否位于目标允许根目录之内，并阻止进入敏感目录。工具清理缓存目录的“子项”，不删除父目录本身，除非该目标被定义为旧隔离目录这类可删除目录。
+   删除前会检查候选路径是否位于目标允许根目录之内，并阻止进入敏感目录。工具清理缓存目录的“子项”，不删除父目录本身；对 NetLimiter 只允许删除明确的 `nlstats.db` 文件。
 
 4. 执行模式
-   `Scan` 只估算空间；`Clean` 默认 dry-run；`Clean -Apply` 才执行删除。管理员目标会先检查权限，Windows Update 缓存清理会尝试停止相关更新服务链后再清理缓存内容。
+   `Scan` 只估算空间；`Clean` 默认 dry-run；`Clean -Apply` 才执行删除。管理员目标会先检查权限，Windows Update 缓存清理会尝试停止相关更新服务链后再清理缓存内容，NetLimiter 统计库清理会围绕 `NLSvc` 做停止和恢复。
 
 ## 支持的清理项
 
@@ -48,6 +48,7 @@ CPanCleaner 的实现由四层组成：
 | `DeliveryOptimization` | 否 | Medium | 管理员 | Delivery Optimization 缓存。 |
 | `RecycleBin` | 否 | High | 普通权限 | 清空 C 盘回收站，会永久移除用户已删除文件。 |
 | `OldQuarantine` | 否 | Medium | 管理员 | 删除历史维护产生的已知隔离目录。 |
+| `NetLimiterStats` | 否 | High | 管理员 | 删除 `C:\ProgramData\Locktime\NetLimiter\5\Stats\nlstats.db`。会丢失 NetLimiter 历史流量统计。 |
 | `All` | 否 | Mixed | 视目标而定 | 选择全部已注册目标，仍遵守权限和安全检查。 |
 
 ## 开发环境要求
@@ -55,7 +56,7 @@ CPanCleaner 的实现由四层组成：
 - Windows 10/11 或 Windows Server。
 - Windows PowerShell 5.1 或 PowerShell 7+。
 - Git，用于版本管理和发布。
-- 推荐使用管理员 PowerShell 运行涉及系统缓存的验证，但默认扫描和 dry-run 可在普通权限下运行。
+- 推荐使用管理员 PowerShell 运行涉及系统缓存或服务控制的验证，但默认扫描和 dry-run 可在普通权限下运行。
 
 ## 运行权限
 
@@ -72,6 +73,7 @@ CPanCleaner 的实现由四层组成：
 - Windows 升级暂存目录。
 - Delivery Optimization 缓存。
 - 旧隔离目录。
+- NetLimiter 历史流量统计数据库。
 
 可用 `-Elevate` 触发 UAC：
 
@@ -117,6 +119,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Cl
 powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include WindowsUpdate,DeliveryOptimization -Apply -Elevate
 ```
 
+预览 NetLimiter 历史流量统计数据库清理：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include NetLimiterStats -DryRun
+```
+
+执行 NetLimiter 历史流量统计数据库清理：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include NetLimiterStats -Apply -Elevate
+```
+
+执行时工具会尝试停止 `NLSvc`，删除 `nlstats.db`，再按原运行状态重启 `NLSvc`。删除该数据库会释放空间，但会丢失 NetLimiter 历史流量统计。
+
 运行 Git fsmonitor / Conda 残留诊断：
 
 ```powershell
@@ -143,6 +159,7 @@ logs\cpancleaner-YYYYMMDD-HHMMSS-xxxxxxxx.log
 - dry-run 预览。
 - 管理员目标跳过原因。
 - Windows Update 服务停止尝试。
+- NetLimiter 服务停止和恢复尝试。
 - 删除成功或失败的路径。
 
 `logs\*.log` 和 `logs\*.json` 默认不提交到 Git；仓库仅保留 `logs\.gitkeep`。
@@ -167,13 +184,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Sc
 powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include Default -DryRun
 ```
 
+NetLimiter 扫描验证：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Scan -Include NetLimiterStats -Json
+```
+
+NetLimiter dry-run 验证：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include NetLimiterStats -DryRun
+```
+
 诊断入口验证：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Diagnose -Json
 ```
 
-发布前至少通过以上四项验证。涉及 `-Apply` 的真实清理应只在明确维护窗口中执行，并先保留 dry-run 输出或日志。
+发布前至少通过以上验证。涉及 `-Apply` 的真实清理应只在明确维护窗口中执行，并先保留 dry-run 输出或日志。
 
 ## 安全边界
 
@@ -202,6 +231,8 @@ Windows Update 清理只处理缓存和暂存内容，不删除：
 
 回收站属于高风险目标，不在默认清理范围内。
 
+NetLimiter 统计数据库属于高风险目标，不在默认清理范围内。CPanCleaner 只允许删除明确的 `nlstats.db` 文件，不清理整个 NetLimiter 目录。
+
 ## 版本规范
 
 CPanCleaner 使用语义化版本：
@@ -222,7 +253,7 @@ MAJOR.MINOR.PATCH
 
 1. 更新 `$script:CleanerVersion`。
 2. 更新 README 中与版本相关的说明。
-3. 运行测试验证章节中的四条命令。
+3. 运行测试验证章节中的命令。
 4. 确认 `git status` 只包含预期文件。
 5. 提交：
 
@@ -247,5 +278,5 @@ git push origin vX.Y.Z
 如果只是开发提交而不是正式发布，提交信息应描述行为变化，例如：
 
 ```powershell
-git commit -m "Add safe Windows cleanup workflow"
+git commit -m "Add NetLimiter statistics cleanup target"
 ```

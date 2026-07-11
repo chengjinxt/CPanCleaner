@@ -3,7 +3,7 @@ param(
     [ValidateSet('Scan', 'Clean', 'Diagnose')]
     [string] $Action = 'Scan',
 
-    [ValidateSet('Default', 'Temp', 'WindowsUpdate', 'DeliveryOptimization', 'RecycleBin', 'OldQuarantine', 'All')]
+    [ValidateSet('Default', 'Temp', 'WindowsUpdate', 'DeliveryOptimization', 'RecycleBin', 'OldQuarantine', 'NetLimiterStats', 'All')]
     [string[]] $Include = @('Default'),
 
     [switch] $Apply,

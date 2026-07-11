@@ -1,6 +1,6 @@
 Set-StrictMode -Version 2.0
 
-$script:CleanerVersion = '0.1.0'
+$script:CleanerVersion = '0.2.0'
 
 function Get-CPanSystemDrive {
     $drive = $env:SystemDrive
@@ -303,6 +303,18 @@ function Get-CPanStaticTargets {
         -UseAgeFilter $false `
         -Description 'Empties the C drive recycle bin. This can permanently remove user-deleted files.'
 
+    $targets += New-CPanTarget `
+        -Id 'NetLimiterStatsDb' `
+        -Name 'NetLimiter traffic statistics database' `
+        -Path "$systemDrive\ProgramData\Locktime\NetLimiter\5\Stats\nlstats.db" `
+        -Kind 'FileSelf' `
+        -Risk 'High' `
+        -Category 'NetLimiterStats' `
+        -Default $false `
+        -RequiresAdmin $true `
+        -UseAgeFilter $false `
+        -Description 'NetLimiter traffic history database. Removing it frees space but loses historical traffic statistics.'
+
     return $targets
 }
 
@@ -395,7 +407,7 @@ function Get-CPanCandidateItems {
         return @()
     }
 
-    if ($Target.Kind -eq 'DirectorySelf') {
+    if ($Target.Kind -eq 'DirectorySelf' -or $Target.Kind -eq 'FileSelf') {
         return @(Get-Item -LiteralPath $Target.Path -Force -ErrorAction SilentlyContinue)
     }
 
@@ -554,6 +566,93 @@ function Invoke-CPanWindowsUpdatePause {
     }
 }
 
+function Stop-CPanNetLimiterService {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context
+    )
+
+    $serviceName = 'NLSvc'
+    $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+    if (-not $service) {
+        Write-CPanLog -Context $Context -Level 'WARN' -Message 'NetLimiter service NLSvc was not found; continuing with file cleanup.'
+        return [pscustomobject]@{
+            ServiceFound = $false
+            WasRunning = $false
+            Stopped = $true
+            ServiceName = $serviceName
+        }
+    }
+
+    $wasRunning = $service.Status -eq 'Running'
+    if (-not $wasRunning) {
+        Write-CPanLog -Context $Context -Level 'INFO' -Message "NetLimiter service $serviceName is $($service.Status); no stop needed."
+        return [pscustomobject]@{
+            ServiceFound = $true
+            WasRunning = $false
+            Stopped = $true
+            ServiceName = $serviceName
+        }
+    }
+
+    try {
+        Write-CPanLog -Context $Context -Level 'INFO' -Message "Stopping NetLimiter service $serviceName before deleting traffic statistics."
+        Stop-Service -Name $serviceName -Force -ErrorAction Stop
+
+        $stopped = $false
+        for ($i = 0; $i -lt 15; $i++) {
+            Start-Sleep -Seconds 1
+            $current = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+            if ($current -and $current.Status -eq 'Stopped') {
+                $stopped = $true
+                break
+            }
+        }
+
+        if (-not $stopped) {
+            Write-CPanLog -Context $Context -Level 'WARN' -Message "NetLimiter service $serviceName did not stop within the wait window."
+        }
+
+        return [pscustomobject]@{
+            ServiceFound = $true
+            WasRunning = $true
+            Stopped = $stopped
+            ServiceName = $serviceName
+        }
+    } catch {
+        $current = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        $stoppedAfterError = $current -and $current.Status -eq 'Stopped'
+        Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not stop NetLimiter service ${serviceName}: $($_.Exception.Message)"
+        return [pscustomobject]@{
+            ServiceFound = $true
+            WasRunning = $true
+            Stopped = [bool] $stoppedAfterError
+            ServiceName = $serviceName
+        }
+    }
+}
+
+function Restore-CPanNetLimiterService {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $State
+    )
+
+    if (-not $State.ServiceFound -or -not $State.WasRunning -or -not $State.Stopped) {
+        return
+    }
+
+    try {
+        Write-CPanLog -Context $Context -Level 'INFO' -Message "Restarting NetLimiter service $($State.ServiceName)."
+        Start-Service -Name $State.ServiceName -ErrorAction Stop
+    } catch {
+        Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not restart NetLimiter service $($State.ServiceName): $($_.Exception.Message)"
+    }
+}
+
 function Remove-CPanSafeItem {
     param(
         [Parameter(Mandatory = $true)]
@@ -661,29 +760,57 @@ function Invoke-CPanCleanTarget {
         Invoke-CPanWindowsUpdatePause -Context $Context
     }
 
-    if ($Target.Kind -eq 'RecycleBin') {
-        try {
-            Clear-RecycleBin -DriveLetter (Get-CPanSystemDrive).TrimEnd(':') -Force -ErrorAction Stop
-            $status = 'Cleaned'
-            Write-CPanLog -Context $Context -Level 'INFO' -Message 'Emptied C drive recycle bin.'
-        } catch {
-            $status = 'PartialOrFailed'
-            $errors += $_.Exception.Message
-            Write-CPanLog -Context $Context -Level 'WARN' -Message "Failed to empty recycle bin: $($_.Exception.Message)"
-        }
-    } else {
-        $candidates = @(Get-CPanCandidateItems -Target $Target -MinimumAgeDays $MinimumAgeDays)
-        foreach ($candidate in $candidates) {
-            $allowRoot = $Target.Kind -eq 'DirectorySelf'
-            $result = Remove-CPanSafeItem -Item $candidate -AllowedRoot $Target.Path -Context $Context -AllowRootItself:$allowRoot
-            if ($result.Removed) {
-                $removedCount++
-            } elseif ($result.Error) {
-                $errors += $result.Error
+    $netLimiterState = $null
+    if ($Target.Category -eq 'NetLimiterStats') {
+        $netLimiterState = Stop-CPanNetLimiterService -Context $Context
+        if ($netLimiterState.WasRunning -and -not $netLimiterState.Stopped) {
+            Restore-CPanNetLimiterService -Context $Context -State $netLimiterState
+            return [pscustomobject]@{
+                Id = $Target.Id
+                Name = $Target.Name
+                Category = $Target.Category
+                Risk = $Target.Risk
+                Mode = $mode
+                Status = 'PartialOrFailed'
+                Exists = $measurement.Exists
+                EstimatedMB = $measurement.EstimatedMB
+                ItemCount = $measurement.ItemCount
+                RemovedCount = $removedCount
+                Path = $Target.Path
+                Message = 'NLSvc could not be stopped safely; nlstats.db was not removed.'
             }
         }
+    }
 
-        $status = if ($errors.Count -eq 0) { 'Cleaned' } else { 'PartialOrFailed' }
+    try {
+        if ($Target.Kind -eq 'RecycleBin') {
+            try {
+                Clear-RecycleBin -DriveLetter (Get-CPanSystemDrive).TrimEnd(':') -Force -ErrorAction Stop
+                $status = 'Cleaned'
+                Write-CPanLog -Context $Context -Level 'INFO' -Message 'Emptied C drive recycle bin.'
+            } catch {
+                $status = 'PartialOrFailed'
+                $errors += $_.Exception.Message
+                Write-CPanLog -Context $Context -Level 'WARN' -Message "Failed to empty recycle bin: $($_.Exception.Message)"
+            }
+        } else {
+            $candidates = @(Get-CPanCandidateItems -Target $Target -MinimumAgeDays $MinimumAgeDays)
+            foreach ($candidate in $candidates) {
+                $allowRoot = $Target.Kind -eq 'DirectorySelf' -or $Target.Kind -eq 'FileSelf'
+                $result = Remove-CPanSafeItem -Item $candidate -AllowedRoot $Target.Path -Context $Context -AllowRootItself:$allowRoot
+                if ($result.Removed) {
+                    $removedCount++
+                } elseif ($result.Error) {
+                    $errors += $result.Error
+                }
+            }
+
+            $status = if ($errors.Count -eq 0) { 'Cleaned' } else { 'PartialOrFailed' }
+        }
+    } finally {
+        if ($netLimiterState) {
+            Restore-CPanNetLimiterService -Context $Context -State $netLimiterState
+        }
     }
 
     return [pscustomobject]@{
@@ -808,7 +935,7 @@ function Invoke-CPanCleaner {
         [ValidateSet('Scan', 'Clean', 'Diagnose')]
         [string] $Action = 'Scan',
 
-        [ValidateSet('Default', 'Temp', 'WindowsUpdate', 'DeliveryOptimization', 'RecycleBin', 'OldQuarantine', 'All')]
+        [ValidateSet('Default', 'Temp', 'WindowsUpdate', 'DeliveryOptimization', 'RecycleBin', 'OldQuarantine', 'NetLimiterStats', 'All')]
         [string[]] $Include = @('Default'),
 
         [switch] $Apply,

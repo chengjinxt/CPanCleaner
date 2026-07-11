@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0 - 2026-07-11
+
+- Added explicit `NetLimiterStats` include target for `C:\ProgramData\Locktime\NetLimiter\5\Stats\nlstats.db`.
+- Added NetLimiter service handling for real cleanup: stop `NLSvc`, remove `nlstats.db`, and restart `NLSvc` when it was originally running.
+- Updated README and static safety tests for the NetLimiter statistics database target.
+
 ## 0.1.0 - 2026-07-11
 
 - Initial CPanCleaner PowerShell project.
