@@ -4,10 +4,15 @@ CPanCleaner is intentionally conservative. A C drive cleaner can do real damage 
 
 ## Default Behavior
 
-The default include set is `Default`, which maps to low-risk temporary locations:
+The default include set is `Default`, which maps to low-risk temporary and diagnostic/cache locations:
 
 - Current user temp directory.
 - `C:\Windows\Temp`.
+- Windows Error Reporting cache.
+- Debug symbol cache.
+- Current-user Windows Internet cache.
+- Current-user crash dumps.
+- Old Codex runtime cache directories matching `codex-primary-runtime.previous-*`.
 
 Cleaning those locations still defaults to dry-run mode. Real deletion requires `-Apply`.
 
@@ -18,6 +23,7 @@ These targets require explicit opt-in and administrator rights:
 - `WindowsUpdate`
 - `DeliveryOptimization`
 - `OldQuarantine`
+- `DiagnosticsCache` entries that live under `C:\ProgramData`
 - `NetLimiterStats`
 - `VisualStudioPackageCache`
 
@@ -80,6 +86,21 @@ C:\ProgramData\Microsoft\VisualStudio\Packages
 ```
 
 The target is high risk because Visual Studio setup may need cached packages for repair, modify, or uninstall operations. It is never selected by `Default`. CPanCleaner preserves the parent directory and only removes children inside that explicit cache root.
+
+## Prototype-Parity Low-Risk Caches
+
+The modular project intentionally retains the useful safe targets from the original single-file prototype:
+
+- `DiagnosticsCache`: `C:\ProgramData\Microsoft\Windows\WER` and `C:\ProgramData\Dbg\sym`.
+- `InternetCache`: current-user `Microsoft\Windows\INetCache`.
+- `CrashDumps`: current-user `CrashDumps`.
+- `CodexRuntimeCache`: previous Codex runtime directories only, never the current runtime directory.
+
+These are part of `Default` because they are cache or diagnostic data. ProgramData diagnostics entries may still require administrator rights and are skipped with `NeedsAdministrator` when not elevated.
+
+## Reports
+
+Each run writes a log and, when file-system targets are scanned or cleaned, a CSV report. The CSV defaults to the same basename as the log under `logs\`.
 
 ## Git And Conda Diagnostics
 

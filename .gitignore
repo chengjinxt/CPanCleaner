@@ -1,5 +1,8 @@
 logs/*.log
 logs/*.json
+logs/*.csv
+CPanCleaner-*.log
+CPanCleaner-*.csv
 *.tmp
 *.bak
 .DS_Store

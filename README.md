@@ -30,7 +30,7 @@ CPanCleaner 的实现由四层组成：
    所有可清理位置都由模块内的目标定义注册，包含 `Id`、路径、风险级别、是否默认、是否需要管理员、是否使用时间过滤等元数据。
 
 2. 选择策略
-   `-Include Default` 只选择低风险默认目标；`WindowsUpdate`、`DeliveryOptimization`、`RecycleBin`、`OldQuarantine`、`NetLimiterStats`、`VisualStudioPackageCache` 等目标必须显式选择；`All` 只表示选择所有已注册目标，不表示绕过安全策略。
+   `-Include Default` 只选择低风险默认目标；`DiagnosticsCache`、`InternetCache`、`CrashDumps`、`CodexRuntimeCache` 是从原型保留下来的低风险缓存类目标；`WindowsUpdate`、`DeliveryOptimization`、`RecycleBin`、`OldQuarantine`、`NetLimiterStats`、`VisualStudioPackageCache` 等目标必须显式选择；`All` 只表示选择所有已注册目标，不表示绕过安全策略。
 
 3. 路径安全检查
    删除前会检查候选路径是否位于目标允许根目录之内，并阻止进入敏感目录。工具清理缓存目录的“子项”，不删除父目录本身；对 NetLimiter 只允许删除明确的 `nlstats.db` 文件。
@@ -44,6 +44,10 @@ CPanCleaner 的实现由四层组成：
 | --- | --- | --- | --- | --- |
 | `Default` | 是 | Low | 普通权限 | 当前用户临时目录和 `C:\Windows\Temp` 中超过 `-MinimumAgeDays` 的项目。 |
 | `Temp` | 是 | Low | 普通权限 | 与默认临时目录目标相同。 |
+| `DiagnosticsCache` | 是 | Low | 视目录而定 | Windows Error Reporting 缓存和调试符号缓存。ProgramData 下的目标可能需要管理员权限。 |
+| `InternetCache` | 是 | Low | 普通权限 | 当前用户 `INetCache`。 |
+| `CrashDumps` | 是 | Low | 普通权限 | 当前用户应用崩溃转储。 |
+| `CodexRuntimeCache` | 是 | Low | 普通权限 | 仅清理 `codex-primary-runtime.previous-*` 旧 Codex runtime，不清理当前 runtime。 |
 | `WindowsUpdate` | 否 | Medium | 管理员 | Windows Update 下载缓存、升级暂存目录、Update Assistant 缓存。保留父目录，不碰组件库。 |
 | `DeliveryOptimization` | 否 | Medium | 管理员 | Delivery Optimization 缓存。 |
 | `RecycleBin` | 否 | High | 普通权限 | 清空 C 盘回收站，会永久移除用户已删除文件。 |
@@ -190,7 +194,13 @@ logs\cpancleaner-YYYYMMDD-HHMMSS-xxxxxxxx.log
 - Visual Studio 包缓存清理结果。
 - 删除成功或失败的路径。
 
-`logs\*.log` 和 `logs\*.json` 默认不提交到 Git；仓库仅保留 `logs\.gitkeep`。
+同名 CSV 报告也会自动生成，默认位于 `logs\`：
+
+```text
+logs\cpancleaner-YYYYMMDD-HHMMSS-xxxxxxxx.csv
+```
+
+`logs\*.log`、`logs\*.json` 和 `logs\*.csv` 默认不提交到 Git；仓库仅保留 `logs\.gitkeep`。
 
 ## 测试验证方式
 
@@ -198,6 +208,12 @@ logs\cpancleaner-YYYYMMDD-HHMMSS-xxxxxxxx.log
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Invoke-StaticTests.ps1
+```
+
+兼容原型项目的根目录测试入口：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Test-CPanCleaner.ps1
 ```
 
 默认扫描验证：
@@ -210,6 +226,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Sc
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include Default -DryRun
+```
+
+原型兼容的短时间窗口临时文件预览：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include Temp -MinimumAgeHours 2 -DryRun
+```
+
+低风险缓存分组 dry-run 验证：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include DiagnosticsCache,InternetCache,CrashDumps,CodexRuntimeCache -DryRun
 ```
 
 NetLimiter 扫描验证：
@@ -262,6 +290,8 @@ Windows Update 清理只处理缓存和暂存内容，不删除：
 - BITS 队列数据库
 - Windows Update 日志
 - 系统组件库
+
+默认低风险缓存包含 WER、调试符号缓存、当前用户 INetCache、当前用户 CrashDumps 和旧 Codex runtime。旧 Codex runtime 只匹配 `codex-primary-runtime.previous-*`，不清理当前 runtime。
 
 回收站属于高风险目标，不在默认清理范围内。
 

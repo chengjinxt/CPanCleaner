@@ -33,6 +33,9 @@ Assert-False -Condition (@($defaultTargets | Where-Object { $_.Risk -eq 'High' }
 Assert-False -Condition (@($defaultTargets | Where-Object { $_.Category -eq 'RecycleBin' }).Count -gt 0) -Message 'Default include must not select recycle bin.'
 Assert-False -Condition (@($defaultTargets | Where-Object { $_.Category -eq 'NetLimiterStats' }).Count -gt 0) -Message 'Default include must not select NetLimiter statistics.'
 Assert-False -Condition (@($defaultTargets | Where-Object { $_.Category -eq 'VisualStudioPackageCache' }).Count -gt 0) -Message 'Default include must not select Visual Studio package cache.'
+Assert-True -Condition (@($defaultTargets | Where-Object { $_.Category -eq 'DiagnosticsCache' }).Count -gt 0) -Message 'Default include should select low-risk diagnostics caches.'
+Assert-True -Condition (@($defaultTargets | Where-Object { $_.Category -eq 'InternetCache' }).Count -gt 0) -Message 'Default include should select current-user internet cache.'
+Assert-True -Condition (@($defaultTargets | Where-Object { $_.Category -eq 'CrashDumps' }).Count -gt 0) -Message 'Default include should select current-user crash dumps.'
 Assert-True -Condition (@($allTargets | Where-Object { $_.Category -eq 'WindowsUpdate' }).Count -gt 0) -Message 'All include should expose Windows Update targets.'
 Assert-True -Condition (@($allTargets | Where-Object { $_.Category -eq 'RecycleBin' }).Count -eq 1) -Message 'All include should expose recycle bin target.'
 Assert-True -Condition (@($allTargets | Where-Object { $_.Category -eq 'NetLimiterStats' }).Count -eq 1) -Message 'All include should expose NetLimiter statistics target.'
@@ -85,5 +88,23 @@ Assert-True `
 Assert-True `
     -Condition (Test-CPanPathSafety -Path "$systemDrive\ProgramData\Microsoft\VisualStudio\Packages\cpancleaner-test.pkg" -AllowedRoot "$systemDrive\ProgramData\Microsoft\VisualStudio\Packages") `
     -Message 'Visual Studio package cache children should be allowed only under their explicit cache root.'
+
+Assert-True `
+    -Condition (Test-CPanPathSafety -Path "$systemDrive\ProgramData\Microsoft\Windows\WER\cpancleaner-test.tmp" -AllowedRoot "$systemDrive\ProgramData\Microsoft\Windows\WER") `
+    -Message 'WER cache children should be allowed under their explicit cache root.'
+
+Assert-True `
+    -Condition (Test-CPanPathSafety -Path "$systemDrive\ProgramData\Dbg\sym\cpancleaner-test.tmp" -AllowedRoot "$systemDrive\ProgramData\Dbg\sym") `
+    -Message 'Debug symbol cache children should be allowed under their explicit cache root.'
+
+if ($env:LOCALAPPDATA) {
+    Assert-True `
+        -Condition (Test-CPanPathSafety -Path (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\INetCache\cpancleaner-test.tmp') -AllowedRoot (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\INetCache')) `
+        -Message 'Current-user INetCache children should be allowed under their explicit cache root.'
+
+    Assert-True `
+        -Condition (Test-CPanPathSafety -Path (Join-Path $env:LOCALAPPDATA 'CrashDumps\cpancleaner-test.dmp') -AllowedRoot (Join-Path $env:LOCALAPPDATA 'CrashDumps')) `
+        -Message 'Current-user crash dump children should be allowed under their explicit cache root.'
+}
 
 Write-Host 'All CPanCleaner static safety tests passed.'

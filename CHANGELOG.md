@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 - 2026-07-11
+
+- Ported remaining prototype cleanup coverage into the modular project: Windows Error Reporting cache, debug symbol cache, current-user Internet cache, current-user crash dumps, and old Codex runtime cache directories.
+- Added `MinimumAgeHours` for prototype-compatible short-window temp cleanup.
+- Added comma-separated `-Include A,B` support in addition to repeated argument syntax.
+- Added automatic CSV report output alongside run logs.
+- Added root `Test-CPanCleaner.ps1` compatibility test entrypoint.
+- Updated README, safety notes, static tests, and `.gitignore` for full prototype parity.
+
 ## 0.3.0 - 2026-07-11
 
 - Added explicit `VisualStudioPackageCache` include target for `C:\ProgramData\Microsoft\VisualStudio\Packages`.

@@ -1,6 +1,6 @@
 Set-StrictMode -Version 2.0
 
-$script:CleanerVersion = '0.3.0'
+$script:CleanerVersion = '0.4.0'
 
 function Get-CPanSystemDrive {
     $drive = $env:SystemDrive
@@ -220,6 +220,56 @@ function Get-CPanStaticTargets {
         -Description 'Files under Windows Temp older than the selected age. Locked files are skipped.'
 
     $targets += New-CPanTarget `
+        -Id 'WindowsErrorReporting' `
+        -Name 'Windows Error Reporting cache' `
+        -Path "$systemDrive\ProgramData\Microsoft\Windows\WER" `
+        -Kind 'DirectoryChildren' `
+        -Risk 'Low' `
+        -Category 'DiagnosticsCache' `
+        -Default $true `
+        -RequiresAdmin $true `
+        -UseAgeFilter $false `
+        -Description 'Windows Error Reporting diagnostic reports and queued archive data.'
+
+    $targets += New-CPanTarget `
+        -Id 'DebugSymbolCache' `
+        -Name 'Debug symbol cache' `
+        -Path "$systemDrive\ProgramData\Dbg\sym" `
+        -Kind 'DirectoryChildren' `
+        -Risk 'Low' `
+        -Category 'DiagnosticsCache' `
+        -Default $true `
+        -RequiresAdmin $true `
+        -UseAgeFilter $false `
+        -Description 'Downloaded debug symbol cache.'
+
+    if ($env:LOCALAPPDATA) {
+        $targets += New-CPanTarget `
+            -Id 'InternetCache' `
+            -Name 'Windows Internet cache' `
+            -Path (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\INetCache') `
+            -Kind 'DirectoryChildren' `
+            -Risk 'Low' `
+            -Category 'InternetCache' `
+            -Default $true `
+            -RequiresAdmin $false `
+            -UseAgeFilter $false `
+            -Description 'Current user Windows Internet cache.'
+
+        $targets += New-CPanTarget `
+            -Id 'UserCrashDumps' `
+            -Name 'Current user crash dumps' `
+            -Path (Join-Path $env:LOCALAPPDATA 'CrashDumps') `
+            -Kind 'DirectoryChildren' `
+            -Risk 'Low' `
+            -Category 'CrashDumps' `
+            -Default $true `
+            -RequiresAdmin $false `
+            -UseAgeFilter $false `
+            -Description 'Current user application crash dump files.'
+    }
+
+    $targets += New-CPanTarget `
         -Id 'WindowsUpdateDownload' `
         -Name 'Windows Update download cache' `
         -Path "$systemDrive\Windows\SoftwareDistribution\Download" `
@@ -370,6 +420,38 @@ function Get-CPanOldQuarantineTargets {
     return $targets
 }
 
+function Get-CPanCodexPreviousRuntimeTargets {
+    $userProfile = ConvertTo-CPanFullPath $env:USERPROFILE
+    if (-not $userProfile) {
+        return @()
+    }
+
+    $runtimeRoot = Join-Path $userProfile '.cache\codex-runtimes'
+    if (-not (Test-Path -LiteralPath $runtimeRoot)) {
+        return @()
+    }
+
+    $targets = @()
+    $matches = Get-ChildItem -LiteralPath $runtimeRoot -Force -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'codex-primary-runtime.previous-*' }
+
+    foreach ($match in $matches) {
+        $targets += New-CPanTarget `
+            -Id ('CodexPreviousRuntime:' + $match.Name) `
+            -Name ('Old Codex runtime cache: ' + $match.Name) `
+            -Path $match.FullName `
+            -Kind 'DirectorySelf' `
+            -Risk 'Low' `
+            -Category 'CodexRuntimeCache' `
+            -Default $true `
+            -RequiresAdmin $false `
+            -UseAgeFilter $false `
+            -Description 'Old Codex runtime cache directory. Current runtime directories are kept.'
+    }
+
+    return $targets
+}
+
 function Get-CPanCleanerTarget {
     param(
         [string[]] $Include = @('Default')
@@ -379,10 +461,40 @@ function Get-CPanCleanerTarget {
         $Include = @('Default')
     }
 
-    $normalized = $Include | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    $knownIncludes = @(
+        'Default',
+        'Temp',
+        'DiagnosticsCache',
+        'InternetCache',
+        'CrashDumps',
+        'CodexRuntimeCache',
+        'WindowsUpdate',
+        'DeliveryOptimization',
+        'RecycleBin',
+        'OldQuarantine',
+        'NetLimiterStats',
+        'VisualStudioPackageCache',
+        'All'
+    )
+
+    $normalized = @($Include | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $targets = @(Get-CPanStaticTargets)
-    if ($normalized -contains 'OldQuarantine' -or $normalized -contains 'All') {
+    if ($normalized -contains 'Default' -or $normalized -contains 'CodexRuntimeCache' -or $normalized -contains 'All' -or @($normalized | Where-Object { $_ -like 'CodexPreviousRuntime:*' }).Count -gt 0) {
+        $targets += @(Get-CPanCodexPreviousRuntimeTargets)
+    }
+
+    if ($normalized -contains 'OldQuarantine' -or $normalized -contains 'All' -or @($normalized | Where-Object { $_ -like 'OldQuarantine:*' }).Count -gt 0) {
         $targets += @(Get-CPanOldQuarantineTargets)
+    }
+
+    $invalid = @($normalized | Where-Object {
+        $includeItem = $_
+        $knownIncludes -notcontains $includeItem -and
+        @($targets | Where-Object { $_.Id -eq $includeItem }).Count -eq 0
+    })
+
+    if ($invalid.Count -gt 0) {
+        throw ('Unknown Include value(s): {0}' -f ($invalid -join ', '))
     }
 
     if ($normalized -contains 'All') {
@@ -412,7 +524,8 @@ function Get-CPanCandidateItems {
         [Parameter(Mandatory = $true)]
         [pscustomobject] $Target,
 
-        [int] $MinimumAgeDays = 1
+        [int] $MinimumAgeDays = 1,
+        [int] $MinimumAgeHours = -1
     )
 
     if (-not $Target.Path -or -not (Test-Path -LiteralPath $Target.Path)) {
@@ -429,7 +542,11 @@ function Get-CPanCandidateItems {
 
     $items = @(Get-ChildItem -LiteralPath $Target.Path -Force -ErrorAction SilentlyContinue)
     if ($Target.UseAgeFilter) {
-        $cutoff = (Get-Date).AddDays(-1 * [Math]::Max(0, $MinimumAgeDays))
+        $cutoff = if ($MinimumAgeHours -ge 0) {
+            (Get-Date).AddHours(-1 * $MinimumAgeHours)
+        } else {
+            (Get-Date).AddDays(-1 * [Math]::Max(0, $MinimumAgeDays))
+        }
         $items = @($items | Where-Object { $_.LastWriteTime -le $cutoff })
     }
 
@@ -483,6 +600,7 @@ function Measure-CPanTarget {
         [pscustomobject] $Target,
 
         [int] $MinimumAgeDays = 1,
+        [int] $MinimumAgeHours = -1,
         [int] $MaxScanItems = 100000
     )
 
@@ -498,7 +616,7 @@ function Measure-CPanTarget {
         $count = $measurement.Count
         $truncated = $measurement.Truncated
     } elseif ($exists) {
-        $candidates = @(Get-CPanCandidateItems -Target $Target -MinimumAgeDays $MinimumAgeDays)
+        $candidates = @(Get-CPanCandidateItems -Target $Target -MinimumAgeDays $MinimumAgeDays -MinimumAgeHours $MinimumAgeHours)
         foreach ($candidate in $candidates) {
             $measurement = Measure-CPanFileSystemItem -Item $candidate -MaxScanItems $MaxScanItems
             $bytes += $measurement.Bytes
@@ -703,11 +821,12 @@ function Invoke-CPanCleanTarget {
         [pscustomobject] $Context,
 
         [int] $MinimumAgeDays = 1,
+        [int] $MinimumAgeHours = -1,
         [switch] $Apply,
         [bool] $IsAdmin
     )
 
-    $measurement = Measure-CPanTarget -Target $Target -MinimumAgeDays $MinimumAgeDays
+    $measurement = Measure-CPanTarget -Target $Target -MinimumAgeDays $MinimumAgeDays -MinimumAgeHours $MinimumAgeHours
     $mode = if ($Apply) { 'Apply' } else { 'DryRun' }
     $status = 'WouldClean'
     $removedCount = [int64] 0
@@ -806,7 +925,7 @@ function Invoke-CPanCleanTarget {
                 Write-CPanLog -Context $Context -Level 'WARN' -Message "Failed to empty recycle bin: $($_.Exception.Message)"
             }
         } else {
-            $candidates = @(Get-CPanCandidateItems -Target $Target -MinimumAgeDays $MinimumAgeDays)
+            $candidates = @(Get-CPanCandidateItems -Target $Target -MinimumAgeDays $MinimumAgeDays -MinimumAgeHours $MinimumAgeHours)
             foreach ($candidate in $candidates) {
                 $allowRoot = $Target.Kind -eq 'DirectorySelf' -or $Target.Kind -eq 'FileSelf'
                 $result = Remove-CPanSafeItem -Item $candidate -AllowedRoot $Target.Path -Context $Context -AllowRootItself:$allowRoot
@@ -947,14 +1066,15 @@ function Invoke-CPanCleaner {
         [ValidateSet('Scan', 'Clean', 'Diagnose')]
         [string] $Action = 'Scan',
 
-        [ValidateSet('Default', 'Temp', 'WindowsUpdate', 'DeliveryOptimization', 'RecycleBin', 'OldQuarantine', 'NetLimiterStats', 'VisualStudioPackageCache', 'All')]
         [string[]] $Include = @('Default'),
 
         [switch] $Apply,
         [switch] $DryRun,
         [int] $MinimumAgeDays = 1,
+        [int] $MinimumAgeHours = -1,
         [int] $MaxScanItems = 100000,
         [string] $LogDirectory,
+        [string] $CsvPath,
         [string] $RepositoryPath = (Get-Location).Path,
         [switch] $Quiet
     )
@@ -978,13 +1098,30 @@ function Invoke-CPanCleaner {
         $targets = @(Get-CPanCleanerTarget -Include $Include)
         if ($Action -eq 'Scan') {
             foreach ($target in $targets) {
-                $items += Measure-CPanTarget -Target $target -MinimumAgeDays $MinimumAgeDays -MaxScanItems $MaxScanItems
+                $items += Measure-CPanTarget -Target $target -MinimumAgeDays $MinimumAgeDays -MinimumAgeHours $MinimumAgeHours -MaxScanItems $MaxScanItems
             }
         } elseif ($Action -eq 'Clean') {
             foreach ($target in $targets) {
-                $items += Invoke-CPanCleanTarget -Target $target -Context $context -MinimumAgeDays $MinimumAgeDays -Apply:$effectiveApply -IsAdmin $isAdmin
+                $items += Invoke-CPanCleanTarget -Target $target -Context $context -MinimumAgeDays $MinimumAgeDays -MinimumAgeHours $MinimumAgeHours -Apply:$effectiveApply -IsAdmin $isAdmin
             }
         }
+    }
+
+    $effectiveCsvPath = $null
+    if ($items.Count -gt 0) {
+        $effectiveCsvPath = if ([string]::IsNullOrWhiteSpace($CsvPath)) {
+            [System.IO.Path]::ChangeExtension($context.LogPath, '.csv')
+        } else {
+            $CsvPath
+        }
+
+        $csvDirectory = Split-Path -Parent $effectiveCsvPath
+        if ($csvDirectory) {
+            New-Item -ItemType Directory -Force -Path $csvDirectory | Out-Null
+        }
+
+        $items | Export-Csv -LiteralPath $effectiveCsvPath -NoTypeInformation -Encoding UTF8
+        Write-CPanLog -Context $context -Level 'INFO' -Message "CSV report: $effectiveCsvPath"
     }
 
     $summary = [pscustomobject]@{
@@ -994,7 +1131,9 @@ function Invoke-CPanCleaner {
         IsAdministrator = $isAdmin
         Include = ($Include -join ',')
         MinimumAgeDays = $MinimumAgeDays
+        MinimumAgeHours = $MinimumAgeHours
         LogPath = $context.LogPath
+        CsvPath = $effectiveCsvPath
         Items = $items
         Diagnostics = $diagnostics
     }

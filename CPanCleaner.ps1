@@ -3,15 +3,16 @@ param(
     [ValidateSet('Scan', 'Clean', 'Diagnose')]
     [string] $Action = 'Scan',
 
-    [ValidateSet('Default', 'Temp', 'WindowsUpdate', 'DeliveryOptimization', 'RecycleBin', 'OldQuarantine', 'NetLimiterStats', 'VisualStudioPackageCache', 'All')]
     [string[]] $Include = @('Default'),
 
     [switch] $Apply,
     [switch] $DryRun,
     [switch] $Elevate,
     [int] $MinimumAgeDays = 1,
+    [int] $MinimumAgeHours = -1,
     [int] $MaxScanItems = 100000,
     [string] $LogDirectory,
+    [string] $CsvPath,
     [string] $RepositoryPath = (Get-Location).Path,
     [switch] $Json
 )
@@ -37,10 +38,15 @@ if ($Elevate -and -not (Test-CPanAdministrator)) {
     if ($DryRun) { $arguments += '-DryRun' }
     if ($Json) { $arguments += '-Json' }
     $arguments += @('-MinimumAgeDays', $MinimumAgeDays)
+    $arguments += @('-MinimumAgeHours', $MinimumAgeHours)
     $arguments += @('-MaxScanItems', $MaxScanItems)
 
     if ($LogDirectory) {
         $arguments += @('-LogDirectory', ('"{0}"' -f $LogDirectory))
+    }
+
+    if ($CsvPath) {
+        $arguments += @('-CsvPath', ('"{0}"' -f $CsvPath))
     }
 
     if ($RepositoryPath) {
@@ -58,8 +64,10 @@ $result = Invoke-CPanCleaner `
     -Apply:$Apply `
     -DryRun:$DryRun `
     -MinimumAgeDays $MinimumAgeDays `
+    -MinimumAgeHours $MinimumAgeHours `
     -MaxScanItems $MaxScanItems `
     -LogDirectory $LogDirectory `
+    -CsvPath $CsvPath `
     -RepositoryPath $RepositoryPath
 
 if ($Json) {
@@ -70,6 +78,9 @@ if ($Json) {
 Write-Host ''
 Write-Host ('CPanCleaner {0} | Action: {1} | Mode: {2} | Admin: {3}' -f $result.Version, $result.Action, $result.Mode, $result.IsAdministrator)
 Write-Host ('Log: {0}' -f $result.LogPath)
+if ($result.CsvPath) {
+    Write-Host ('CSV: {0}' -f $result.CsvPath)
+}
 Write-Host ''
 
 if ($result.Items.Count -gt 0) {
