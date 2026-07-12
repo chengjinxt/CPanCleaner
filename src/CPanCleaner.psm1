@@ -1,6 +1,6 @@
 Set-StrictMode -Version 2.0
 
-$script:CleanerVersion = '0.4.0'
+$script:CleanerVersion = '0.5.0'
 
 function Get-CPanSystemDrive {
     $drive = $env:SystemDrive
@@ -157,6 +157,36 @@ function Write-CPanLog {
     Add-Content -LiteralPath $Context.LogPath -Value $line
     if (-not $Context.Quiet) {
         Write-Verbose $line
+    }
+}
+
+function New-CPanDiagnosticRecord {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Type,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Info', 'Warning', 'Error')]
+        [string] $Severity,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Name,
+
+        [object] $Id = $null,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Message,
+
+        [string] $Detail = ''
+    )
+
+    return [pscustomobject]@{
+        Type = $Type
+        Severity = $Severity
+        Name = $Name
+        Id = $Id
+        Message = $Message
+        Detail = $Detail
     }
 }
 
@@ -365,18 +395,6 @@ function Get-CPanStaticTargets {
         -UseAgeFilter $false `
         -Description 'NetLimiter traffic history database. Removing it frees space but loses historical traffic statistics.'
 
-    $targets += New-CPanTarget `
-        -Id 'VisualStudioPackageCache' `
-        -Name 'Visual Studio installer package cache' `
-        -Path "$systemDrive\ProgramData\Microsoft\VisualStudio\Packages" `
-        -Kind 'DirectoryChildren' `
-        -Risk 'High' `
-        -Category 'VisualStudioPackageCache' `
-        -Default $false `
-        -RequiresAdmin $true `
-        -UseAgeFilter $false `
-        -Description 'Visual Studio installer package cache. Removing it can free significant space but may affect repair, modify, or uninstall operations.'
-
     return $targets
 }
 
@@ -473,7 +491,6 @@ function Get-CPanCleanerTarget {
         'RecycleBin',
         'OldQuarantine',
         'NetLimiterStats',
-        'VisualStudioPackageCache',
         'All'
     )
 
@@ -485,6 +502,15 @@ function Get-CPanCleanerTarget {
 
     if ($normalized -contains 'OldQuarantine' -or $normalized -contains 'All' -or @($normalized | Where-Object { $_ -like 'OldQuarantine:*' }).Count -gt 0) {
         $targets += @(Get-CPanOldQuarantineTargets)
+    }
+
+    $protectedIncludes = @{
+        VisualStudioPackageCache = 'Visual Studio installer state and package cache are protected because removing C:\ProgramData\Microsoft\VisualStudio\Packages can break Visual Studio project loading, repair, modify, and uninstall.'
+    }
+    $protectedRequested = @($normalized | Where-Object { $protectedIncludes.ContainsKey($_) })
+    if ($protectedRequested.Count -gt 0) {
+        $messages = @($protectedRequested | ForEach-Object { '{0}: {1}' -f $_, $protectedIncludes[$_] })
+        throw ('Protected Include value(s): {0}' -f ($messages -join '; '))
     }
 
     $invalid = @($normalized | Where-Object {
@@ -694,6 +720,758 @@ function Invoke-CPanWindowsUpdatePause {
             Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not stop service ${service}: $($_.Exception.Message)"
         }
     }
+}
+
+function Get-CPanServiceControlSnapshot {
+    param(
+        [string[]] $Name = @('wuauserv', 'UsoSvc', 'DoSvc', 'bits', 'WaaSMedicSvc')
+    )
+
+    foreach ($serviceName in $Name) {
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($service) {
+            [pscustomobject]@{
+                Name = $service.Name
+                DisplayName = $service.DisplayName
+                Status = $service.Status.ToString()
+                StartType = $service.StartType.ToString()
+            }
+        } else {
+            [pscustomobject]@{
+                Name = $serviceName
+                DisplayName = ''
+                Status = 'Missing'
+                StartType = ''
+            }
+        }
+    }
+}
+
+function Set-CPanRegistryDWord {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Name,
+
+        [Parameter(Mandatory = $true)]
+        [int] $Value,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context
+    )
+
+    try {
+        $nativePath = $Path.Replace('HKLM:\', 'HKLM\')
+        $output = & reg.exe add $nativePath /v $Name /t REG_DWORD /d $Value /f 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw (($output | Out-String).Trim())
+        }
+        Write-CPanLog -Context $Context -Level 'INFO' -Message "Set registry policy $Path\$Name=$Value."
+        return New-CPanDiagnosticRecord -Type 'WindowsUpdatePolicy' -Severity 'Info' -Name $Name -Message 'Policy value was set.' -Detail "$Path\$Name=$Value"
+    } catch {
+        Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not set registry policy $Path\${Name}: $($_.Exception.Message)"
+        return New-CPanDiagnosticRecord -Type 'WindowsUpdatePolicy' -Severity 'Warning' -Name $Name -Message 'Policy value could not be set.' -Detail $_.Exception.Message
+    }
+}
+
+function Invoke-CPanScCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]] $Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Name,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Message,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context
+    )
+
+    try {
+        $output = & sc.exe @Arguments 2>&1
+        $detail = ($output | Out-String).Trim()
+        $severity = if ($LASTEXITCODE -eq 0) { 'Info' } else { 'Warning' }
+        Write-CPanLog -Context $Context -Level ($(if ($LASTEXITCODE -eq 0) { 'INFO' } else { 'WARN' })) -Message "$Message $detail"
+        return New-CPanDiagnosticRecord -Type 'WindowsUpdateService' -Severity $severity -Name $Name -Message $Message -Detail $detail
+    } catch {
+        Write-CPanLog -Context $Context -Level 'WARN' -Message "${Message}: $($_.Exception.Message)"
+        return New-CPanDiagnosticRecord -Type 'WindowsUpdateService' -Severity 'Warning' -Name $Name -Message $Message -Detail $_.Exception.Message
+    }
+}
+
+function Disable-CPanWindowsUpdateTask {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $TaskPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $TaskName,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context
+    )
+
+    $displayName = "$TaskPath$TaskName"
+    try {
+        $output = & schtasks.exe /Change /TN $displayName /Disable 2>&1
+        $detail = ($output | Out-String).Trim()
+        $severity = if ($LASTEXITCODE -eq 0) { 'Info' } else { 'Warning' }
+        Write-CPanLog -Context $Context -Level ($(if ($LASTEXITCODE -eq 0) { 'INFO' } else { 'WARN' })) -Message "Scheduled task disable result for ${displayName}: $detail"
+        return New-CPanDiagnosticRecord -Type 'WindowsUpdateTask' -Severity $severity -Name $displayName -Message 'Scheduled task disable was requested.' -Detail $detail
+    } catch {
+        Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not disable scheduled task ${displayName}: $($_.Exception.Message)"
+        return New-CPanDiagnosticRecord -Type 'WindowsUpdateTask' -Severity 'Warning' -Name $displayName -Message 'Scheduled task could not be disabled.' -Detail $_.Exception.Message
+    }
+}
+
+function Invoke-CPanBitsReset {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context
+    )
+
+    try {
+        $output = & bitsadmin.exe /reset /allusers 2>&1
+        $detail = ($output | Out-String).Trim()
+        $severity = if ($LASTEXITCODE -eq 0) { 'Info' } else { 'Warning' }
+        Write-CPanLog -Context $Context -Level ($(if ($LASTEXITCODE -eq 0) { 'INFO' } else { 'WARN' })) -Message "BITS reset result: $detail"
+        return New-CPanDiagnosticRecord -Type 'WindowsUpdateBits' -Severity $severity -Name 'BITS' -Message 'BITS jobs were reset for all users.' -Detail $detail
+    } catch {
+        Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not reset BITS jobs: $($_.Exception.Message)"
+        return New-CPanDiagnosticRecord -Type 'WindowsUpdateBits' -Severity 'Warning' -Name 'BITS' -Message 'BITS jobs could not be reset.' -Detail $_.Exception.Message
+    }
+}
+
+function Set-CPanServiceStartRegistry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ServiceName,
+
+        [int] $Start = 4,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context
+    )
+
+    $keyPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+    if (-not (Test-Path -LiteralPath $keyPath)) {
+        return New-CPanDiagnosticRecord -Type 'WindowsUpdateService' -Severity 'Warning' -Name $ServiceName -Message 'Service registry key was not found.' -Detail $keyPath
+    }
+
+    try {
+        New-ItemProperty -LiteralPath $keyPath -Name 'Start' -Value $Start -PropertyType DWord -Force | Out-Null
+        if ($ServiceName -eq 'UsoSvc' -or $ServiceName -eq 'DoSvc') {
+            New-ItemProperty -LiteralPath $keyPath -Name 'DelayedAutoStart' -Value 0 -PropertyType DWord -Force | Out-Null
+        }
+        Write-CPanLog -Context $Context -Level 'INFO' -Message "Set service registry $ServiceName Start=$Start."
+        return New-CPanDiagnosticRecord -Type 'WindowsUpdateService' -Severity 'Info' -Name $ServiceName -Message 'Service registry start value was set.' -Detail "Start=$Start"
+    } catch {
+        Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not set service registry ${ServiceName}: $($_.Exception.Message)"
+        return New-CPanDiagnosticRecord -Type 'WindowsUpdateService' -Severity 'Warning' -Name $ServiceName -Message 'Service registry start value could not be set.' -Detail $_.Exception.Message
+    }
+}
+
+function Invoke-CPanSystemWindowsUpdateHardening {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context
+    )
+
+    $logDirectory = Split-Path -Parent $Context.LogPath
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $scriptPath = Join-Path $logDirectory "wu-system-hardening-$stamp.ps1"
+    $resultPath = Join-Path $logDirectory "wu-system-hardening-$stamp.json"
+    $taskName = "CPanCleanerWindowsUpdateHardening-$stamp"
+    $escapedResultPath = $resultPath.Replace('\', '\\')
+
+    $script = @"
+`$ErrorActionPreference = 'Continue'
+`$results = @()
+function Add-Result {
+    param([string]`$Type,[string]`$Name,[string]`$Status,[string]`$Detail='')
+    `$script:results += [pscustomobject]@{ Time = (Get-Date).ToString('s'); Type = `$Type; Name = `$Name; Status = `$Status; Detail = `$Detail }
+}
+foreach (`$svc in @('wuauserv','UsoSvc','DoSvc','WaaSMedicSvc')) {
+    try {
+        reg.exe add "HKLM\SYSTEM\CurrentControlSet\Services\`$svc" /v Start /t REG_DWORD /d 4 /f | Out-Null
+        if (`$svc -eq 'UsoSvc' -or `$svc -eq 'DoSvc') {
+            reg.exe add "HKLM\SYSTEM\CurrentControlSet\Services\`$svc" /v DelayedAutoStart /t REG_DWORD /d 0 /f | Out-Null
+        }
+        Add-Result -Type 'ServiceRegistry' -Name `$svc -Status 'Start=4'
+    } catch { Add-Result -Type 'ServiceRegistry' -Name `$svc -Status 'Failed' -Detail `$_.Exception.Message }
+}
+foreach (`$svc in @('wuauserv','UsoSvc','DoSvc','WaaSMedicSvc')) {
+    try {
+        `$out = & sc.exe stop `$svc 2>&1 | Out-String
+        Add-Result -Type 'ServiceStop' -Name `$svc -Status 'Requested' -Detail `$out.Trim()
+    } catch { Add-Result -Type 'ServiceStop' -Name `$svc -Status 'Failed' -Detail `$_.Exception.Message }
+}
+try {
+    `$bits = & bitsadmin.exe /reset /allusers 2>&1 | Out-String
+    Add-Result -Type 'BITS' -Name 'reset' -Status 'Requested' -Detail `$bits.Trim()
+} catch { Add-Result -Type 'BITS' -Name 'reset' -Status 'Failed' -Detail `$_.Exception.Message }
+`$tasks = @(
+    @{Path='\Microsoft\Windows\WindowsUpdate\'; Name='Scheduled Start'},
+    @{Path='\Microsoft\Windows\WindowsUpdate\'; Name='Refresh Group Policy Cache'},
+    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='Report policies'},
+    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='Schedule Maintenance Work'},
+    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='Schedule Scan'},
+    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='Schedule Scan Static Task'},
+    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='Schedule Wake To Work'},
+    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='Schedule Work'},
+    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='Start Oobe Expedite Work'},
+    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='StartOobeAppsScan'},
+    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='StartOobeAppsScan_LicenseAccepted'},
+    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='StartOobeAppsScanAfterUpdate'},
+    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='UIEOrchestrator'},
+    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='USO_UxBroker'},
+    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='UUS Failover Task'},
+    @{Path='\Microsoft\Windows\WaaSMedic\'; Name='DeferredWork'},
+    @{Path='\Microsoft\Windows\WaaSMedic\'; Name='MaintenanceWork'},
+    @{Path='\Microsoft\Windows\WaaSMedic\'; Name='PerformRemediation'}
+)
+foreach (`$task in `$tasks) {
+    `$full = "`$(`$task.Path)`$(`$task.Name)"
+    try {
+        `$out = & schtasks.exe /Change /TN `$full /Disable 2>&1 | Out-String
+        Add-Result -Type 'ScheduledTask' -Name `$full -Status ("SchtasksExit=`$LASTEXITCODE") -Detail `$out.Trim()
+    } catch { Add-Result -Type 'ScheduledTask' -Name `$full -Status 'SchtasksFailed' -Detail `$_.Exception.Message }
+}
+foreach (`$svc in @('wuauserv','UsoSvc','DoSvc','WaaSMedicSvc','bits')) {
+    try {
+        `$s = Get-Service -Name `$svc -ErrorAction Stop
+        Add-Result -Type 'ServiceFinal' -Name `$svc -Status `$s.Status.ToString() -Detail ('StartType=' + `$s.StartType.ToString())
+    } catch { Add-Result -Type 'ServiceFinal' -Name `$svc -Status 'MissingOrFailed' -Detail `$_.Exception.Message }
+}
+`$results | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath '$escapedResultPath' -Encoding UTF8
+"@
+
+    try {
+        Set-Content -LiteralPath $scriptPath -Value $script -Encoding UTF8
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+        $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(10)
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+        Start-ScheduledTask -TaskName $taskName
+
+        $deadline = (Get-Date).AddMinutes(3)
+        while ((Get-Date) -lt $deadline -and -not (Test-Path -LiteralPath $resultPath)) {
+            Start-Sleep -Seconds 2
+        }
+
+        if (-not (Test-Path -LiteralPath $resultPath)) {
+            return @(New-CPanDiagnosticRecord -Type 'WindowsUpdateSystemHardening' -Severity 'Warning' -Name 'SYSTEM task' -Message 'SYSTEM hardening task did not produce a result file before timeout.' -Detail $scriptPath)
+        }
+
+        $systemResultsJson = Get-Content -LiteralPath $resultPath -Encoding UTF8 -Raw
+        $convertedSystemResults = ConvertFrom-Json -InputObject $systemResultsJson
+        $systemResults = @()
+        if ($convertedSystemResults -is [array]) {
+            $systemResults = @($convertedSystemResults)
+        } elseif ($convertedSystemResults -and ($convertedSystemResults.PSObject.Properties.Name -contains 'Type') -and ($convertedSystemResults.Type -is [array])) {
+            $resultCount = @($convertedSystemResults.Type).Count
+            for ($index = 0; $index -lt $resultCount; $index++) {
+                $systemResults += [pscustomobject]@{
+                    Time = @($convertedSystemResults.Time)[$index]
+                    Type = @($convertedSystemResults.Type)[$index]
+                    Name = @($convertedSystemResults.Name)[$index]
+                    Status = @($convertedSystemResults.Status)[$index]
+                    Detail = @($convertedSystemResults.Detail)[$index]
+                }
+            }
+        } elseif ($convertedSystemResults) {
+            $systemResults = @($convertedSystemResults)
+        }
+
+        $records = @()
+        foreach ($result in $systemResults) {
+            $severity = if ($result.Status -match 'Failed|Exit=1') { 'Warning' } else { 'Info' }
+            $records += New-CPanDiagnosticRecord -Type ('WindowsUpdateSystem' + [string] $result.Type) -Severity $severity -Name ([string] $result.Name) -Message ([string] $result.Status) -Detail ([string] $result.Detail)
+        }
+        return $records
+    } catch {
+        return @(New-CPanDiagnosticRecord -Type 'WindowsUpdateSystemHardening' -Severity 'Warning' -Name 'SYSTEM task' -Message 'SYSTEM hardening task failed.' -Detail $_.Exception.Message)
+    } finally {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
+}
+
+function Install-CPanWindowsUpdateGuardTask {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context
+    )
+
+    try {
+        $taskPath = '\CPanCleaner\'
+        $taskName = 'WindowsUpdateGuard'
+        Unregister-ScheduledTask -TaskPath $taskPath -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+
+        $registryPlans = @(
+            [pscustomobject]@{ Path = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DisableWindowsUpdateAccess'; Value = 1 },
+            [pscustomobject]@{ Path = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'SetDisableUXWUAccess'; Value = 1 },
+            [pscustomobject]@{ Path = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DoNotConnectToWindowsUpdateInternetLocations'; Value = 1 },
+            [pscustomobject]@{ Path = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'ExcludeWUDriversInQualityUpdate'; Value = 1 },
+            [pscustomobject]@{ Path = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'NoAutoUpdate'; Value = 1 },
+            [pscustomobject]@{ Path = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'AUOptions'; Value = 2 },
+            [pscustomobject]@{ Path = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization'; Name = 'DODownloadMode'; Value = 0 },
+            [pscustomobject]@{ Path = 'HKLM\SYSTEM\CurrentControlSet\Services\wuauserv'; Name = 'Start'; Value = 4 },
+            [pscustomobject]@{ Path = 'HKLM\SYSTEM\CurrentControlSet\Services\UsoSvc'; Name = 'Start'; Value = 4 },
+            [pscustomobject]@{ Path = 'HKLM\SYSTEM\CurrentControlSet\Services\UsoSvc'; Name = 'DelayedAutoStart'; Value = 0 },
+            [pscustomobject]@{ Path = 'HKLM\SYSTEM\CurrentControlSet\Services\DoSvc'; Name = 'Start'; Value = 4 },
+            [pscustomobject]@{ Path = 'HKLM\SYSTEM\CurrentControlSet\Services\DoSvc'; Name = 'DelayedAutoStart'; Value = 0 },
+            [pscustomobject]@{ Path = 'HKLM\SYSTEM\CurrentControlSet\Services\WaaSMedicSvc'; Name = 'Start'; Value = 4 }
+        )
+
+        $actions = foreach ($plan in $registryPlans) {
+            New-ScheduledTaskAction -Execute 'reg.exe' -Argument ('add "{0}" /v {1} /t REG_DWORD /d {2} /f' -f $plan.Path, $plan.Name, $plan.Value)
+        }
+        $startupTrigger = New-ScheduledTaskTrigger -AtStartup
+        $repeatTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+
+        Register-ScheduledTask -TaskPath $taskPath -TaskName $taskName -Action $actions -Trigger @($startupTrigger, $repeatTrigger) -Principal $principal -Settings $settings -Force | Out-Null
+        Start-ScheduledTask -TaskPath $taskPath -TaskName $taskName
+
+        $detail = "Actions=$($registryPlans.Count) registry writes; Schedule=AtStartup+Every5Minutes"
+        Write-CPanLog -Context $Context -Level 'INFO' -Message "Installed CPanCleaner Windows Update guard task. $detail"
+        return New-CPanDiagnosticRecord -Type 'WindowsUpdateGuard' -Severity 'Info' -Name "$taskPath$taskName" -Message 'Persistent Windows Update guard task was installed and started.' -Detail $detail
+    } catch {
+        Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not install Windows Update guard task: $($_.Exception.Message)"
+        return New-CPanDiagnosticRecord -Type 'WindowsUpdateGuard' -Severity 'Warning' -Name '\CPanCleaner\WindowsUpdateGuard' -Message 'Persistent Windows Update guard task could not be installed.' -Detail $_.Exception.Message
+    }
+}
+
+function Get-CPanPerformancePriorityProcessNames {
+    return @(
+        'NLSvc',
+        'FlClash',
+        'FlClashCore',
+        'SDPProxyClient',
+        'CmicSDPAccessAgent',
+        'CmicSDPAccessAgentDaemon',
+        'CmicSDPAccessAgentTray',
+        'wpscloudsvr',
+        'syncDisk'
+    )
+}
+
+function Get-CPanPerformanceProcessCandidates {
+    $records = [ordered]@{
+        Git = @()
+        Conda = @()
+        GitShellCache = @()
+    }
+
+    try {
+        $processes = Get-CimInstance Win32_Process -ErrorAction Stop
+        $records.Git = @($processes | Where-Object {
+            ($_.Name -eq 'git.exe' -or $_.Name -eq 'git-remote-http.exe') -and
+            $_.CommandLine -match 'fsmonitor--daemon run|git fetch|git remote-http'
+        })
+        $records.Conda = @($processes | Where-Object {
+            $_.Name -eq 'python.exe' -and
+            $_.CommandLine -match 'conda-script.py shell.powershell (hook|activate)'
+        })
+        $records.GitShellCache = @($processes | Where-Object {
+            $_.Name -eq 'TGitCache.exe'
+        })
+    } catch {
+        $records.QueryError = $_.Exception.Message
+    }
+
+    return [pscustomobject]$records
+}
+
+function Get-CPanGitPerformanceRepositoryState {
+    param(
+        [string] $RepositoryPath
+    )
+
+    if (-not $RepositoryPath -or -not (Test-Path -LiteralPath $RepositoryPath)) {
+        return $null
+    }
+
+    try {
+        $gitDir = (& git -C $RepositoryPath rev-parse --git-dir 2>$null)
+        if ($LASTEXITCODE -ne 0 -or -not $gitDir) {
+            return $null
+        }
+        $repositoryRoot = (& git -C $RepositoryPath rev-parse --show-toplevel 2>$null)
+        if ($LASTEXITCODE -ne 0 -or -not $repositoryRoot) {
+            $repositoryRoot = $RepositoryPath
+        }
+        $repositoryRoot = ConvertTo-CPanFullPath $repositoryRoot
+
+        $gitDirPath = if ([System.IO.Path]::IsPathRooted($gitDir)) {
+            $gitDir
+        } else {
+            Join-Path $RepositoryPath $gitDir
+        }
+        $gitDirPath = ConvertTo-CPanFullPath $gitDirPath
+        $fsmonitor = (& git -C $RepositoryPath config --get core.fsmonitor 2>$null)
+        $untrackedCache = (& git -C $RepositoryPath config --get core.untrackedCache 2>$null)
+        $daemonPath = Join-Path $gitDirPath 'fsmonitor--daemon'
+
+        return [pscustomobject]@{
+            RepositoryPath = $repositoryRoot
+            GitDir = $gitDirPath
+            FsMonitor = if ($fsmonitor) { [string] $fsmonitor } else { '<unset>' }
+            UntrackedCache = if ($untrackedCache) { [string] $untrackedCache } else { '<unset>' }
+            HasDaemonState = (Test-Path -LiteralPath $daemonPath)
+            DaemonStatePath = $daemonPath
+        }
+    } catch {
+        return [pscustomobject]@{
+            RepositoryPath = $RepositoryPath
+            GitDir = ''
+            FsMonitor = '<error>'
+            UntrackedCache = '<error>'
+            HasDaemonState = $false
+            DaemonStatePath = ''
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+function Get-CPanNearbyGitPerformanceRepositoryStates {
+    param(
+        [string] $RepositoryPath
+    )
+
+    $states = @()
+    $primaryState = Get-CPanGitPerformanceRepositoryState -RepositoryPath $RepositoryPath
+    if ($primaryState) {
+        $states += $primaryState
+    }
+
+    if (-not $primaryState -or -not $primaryState.RepositoryPath) {
+        return $states
+    }
+
+    $parentPath = Split-Path -Parent $primaryState.RepositoryPath
+    if (-not $parentPath -or -not (Test-Path -LiteralPath $parentPath)) {
+        return $states
+    }
+
+    try {
+        $siblingRepositories = @(Get-ChildItem -LiteralPath $parentPath -Directory -Force -ErrorAction Stop | Where-Object {
+            $_.FullName -ne $primaryState.RepositoryPath -and
+            (Test-Path -LiteralPath (Join-Path $_.FullName '.git\fsmonitor--daemon'))
+        })
+
+        foreach ($repository in $siblingRepositories) {
+            $state = Get-CPanGitPerformanceRepositoryState -RepositoryPath $repository.FullName
+            if ($state) {
+                $states += $state
+            }
+        }
+    } catch {
+        $states += [pscustomobject]@{
+            RepositoryPath = $parentPath
+            GitDir = ''
+            FsMonitor = '<error>'
+            UntrackedCache = '<error>'
+            HasDaemonState = $false
+            DaemonStatePath = ''
+            Error = $_.Exception.Message
+        }
+    }
+
+    $seen = @{}
+    return @($states | Where-Object {
+        $key = $_.RepositoryPath
+        if (-not $key -or $seen.ContainsKey($key)) {
+            return $false
+        }
+        $seen[$key] = $true
+        return $true
+    })
+}
+
+function Get-CPanPerformanceSnapshot {
+    $records = @()
+
+    try {
+        $samples = Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3 -ErrorAction Stop
+        $values = @($samples.CounterSamples | ForEach-Object { [math]::Round($_.CookedValue, 2) })
+        if ($values.Count -gt 0) {
+            $average = [math]::Round((($values | Measure-Object -Average).Average), 2)
+            $records += New-CPanDiagnosticRecord -Type 'PerformanceCpu' -Severity 'Info' -Name 'Processor(_Total)' -Message 'Current total CPU sample.' -Detail ("Samples={0}; Average={1}%" -f ($values -join ', '), $average)
+        }
+    } catch {
+        $records += New-CPanDiagnosticRecord -Type 'PerformanceCpu' -Severity 'Warning' -Name 'Processor(_Total)' -Message 'CPU counters could not be sampled.' -Detail $_.Exception.Message
+    }
+
+    $processSamples = @(Get-Counter '\Process(*)\% Processor Time' -SampleInterval 1 -MaxSamples 2 -ErrorAction SilentlyContinue)
+    if ($processSamples.Count -gt 0) {
+        $topProcesses = @($processSamples[-1].CounterSamples |
+            Where-Object { $_.InstanceName -ne '_total' -and $_.InstanceName -ne 'idle' -and $_.Status -eq 0 } |
+            Sort-Object CookedValue -Descending |
+            Select-Object -First 12)
+
+        foreach ($sample in $topProcesses) {
+            $records += New-CPanDiagnosticRecord `
+                -Type 'PerformanceTopProcess' `
+                -Severity 'Info' `
+                -Name $sample.InstanceName `
+                -Message 'Current process CPU sample.' `
+                -Detail ('CPUPercentRaw={0}' -f ([math]::Round($sample.CookedValue, 2)))
+        }
+    } else {
+        $records += New-CPanDiagnosticRecord -Type 'PerformanceTopProcess' -Severity 'Info' -Name 'ProcessCounters' -Message 'Process CPU counters were not available for this sample.' -Detail ''
+    }
+
+    return $records
+}
+
+function Test-CPanShouldDisableRepositoryFsmonitor {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $RepositoryState
+    )
+
+    return $RepositoryState.FsMonitor -ne 'false' -or $RepositoryState.UntrackedCache -ne 'false'
+}
+
+function Invoke-CPanOptimizePerformance {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context,
+
+        [string] $RepositoryPath,
+
+        [switch] $Apply
+    )
+
+    $records = @(Get-CPanPerformanceSnapshot)
+    $candidates = Get-CPanPerformanceProcessCandidates
+
+    if ($candidates.PSObject.Properties.Name -contains 'QueryError') {
+        $records += New-CPanDiagnosticRecord -Type 'PerformanceProcessQuery' -Severity 'Warning' -Name 'Win32_Process' -Message 'Process candidates could not be queried.' -Detail $candidates.QueryError
+    }
+
+    $gitProcesses = @($candidates.Git)
+    $condaProcesses = @($candidates.Conda)
+    $gitShellCacheProcesses = @()
+    if ($gitProcesses.Count -gt 0) {
+        $gitShellCacheProcesses = @($candidates.GitShellCache)
+    }
+    $repositoryStates = @(Get-CPanNearbyGitPerformanceRepositoryStates -RepositoryPath $RepositoryPath)
+    $priorityNames = Get-CPanPerformancePriorityProcessNames
+    $priorityProcesses = @()
+    foreach ($name in $priorityNames) {
+        $priorityProcesses += @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+    }
+
+    if (-not $Apply) {
+        foreach ($process in $gitProcesses) {
+            $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name $process.Name -Id $process.ProcessId -Message 'Dry-run: stale Git background process would be stopped.' -Detail $process.CommandLine
+        }
+        foreach ($process in $condaProcesses) {
+            $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name $process.Name -Id $process.ProcessId -Message 'Dry-run: stuck Conda PowerShell helper would be stopped.' -Detail $process.CommandLine
+        }
+        foreach ($process in $gitShellCacheProcesses) {
+            $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name $process.Name -Id $process.ProcessId -Message 'Dry-run: TortoiseGit cache helper would be stopped because stale Git background work was found.' -Detail $process.CommandLine
+        }
+        foreach ($process in $priorityProcesses) {
+            $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name $process.ProcessName -Id $process.Id -Message 'Dry-run: process priority would be set to BelowNormal.' -Detail ('CurrentPriority={0}; Path={1}' -f $process.PriorityClass, $process.Path)
+        }
+        foreach ($repositoryState in $repositoryStates) {
+            $records += New-CPanDiagnosticRecord -Type 'GitConfig' -Severity 'Info' -Name 'Repository' -Message 'Repository Git performance state.' -Detail ("Path={0}; core.fsmonitor={1}; core.untrackedCache={2}; DaemonState={3}" -f $repositoryState.RepositoryPath, $repositoryState.FsMonitor, $repositoryState.UntrackedCache, $repositoryState.HasDaemonState)
+            if (Test-CPanShouldDisableRepositoryFsmonitor -RepositoryState $repositoryState) {
+                $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name 'Git fsmonitor' -Message 'Dry-run: repository fsmonitor and untracked cache would be disabled locally.' -Detail ("git -C `"{0}`" config core.fsmonitor false; git -C `"{0}`" config core.untrackedCache false" -f $repositoryState.RepositoryPath)
+            }
+        }
+        $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name 'DNS cache' -Message 'Dry-run: DNS resolver cache would be flushed.' -Detail 'Clear-DnsClientCache and ipconfig /flushdns'
+        if ($gitProcesses.Count -eq 0 -and $condaProcesses.Count -eq 0 -and $gitShellCacheProcesses.Count -eq 0 -and $priorityProcesses.Count -eq 0) {
+            $records += New-CPanDiagnosticRecord -Type 'PerformanceOptimization' -Severity 'Info' -Name 'NoCandidates' -Message 'No stale Git/Conda helpers or known noisy helper processes were found.' -Detail ''
+        }
+        return $records
+    }
+
+    foreach ($process in ($gitProcesses + $condaProcesses + $gitShellCacheProcesses)) {
+        try {
+            Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+            Write-CPanLog -Context $Context -Level 'INFO' -Message "Stopped performance helper process $($process.Name) PID=$($process.ProcessId)."
+            $records += New-CPanDiagnosticRecord -Type 'PerformanceStopProcess' -Severity 'Info' -Name $process.Name -Id $process.ProcessId -Message 'Process was stopped.' -Detail $process.CommandLine
+        } catch {
+            Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not stop process $($process.Name) PID=$($process.ProcessId): $($_.Exception.Message)"
+            $records += New-CPanDiagnosticRecord -Type 'PerformanceStopProcess' -Severity 'Warning' -Name $process.Name -Id $process.ProcessId -Message 'Process could not be stopped.' -Detail $_.Exception.Message
+        }
+    }
+
+    foreach ($repositoryState in $repositoryStates) {
+        if (-not (Test-CPanShouldDisableRepositoryFsmonitor -RepositoryState $repositoryState)) {
+            continue
+        }
+
+        try {
+            & git -C $repositoryState.RepositoryPath config core.fsmonitor false
+            if ($LASTEXITCODE -ne 0) {
+                throw 'git config core.fsmonitor false failed.'
+            }
+            & git -C $repositoryState.RepositoryPath config core.untrackedCache false
+            if ($LASTEXITCODE -ne 0) {
+                throw 'git config core.untrackedCache false failed.'
+            }
+            Write-CPanLog -Context $Context -Level 'INFO' -Message "Disabled Git fsmonitor/untrackedCache for $($repositoryState.RepositoryPath)."
+            $records += New-CPanDiagnosticRecord -Type 'GitConfig' -Severity 'Info' -Name 'Git fsmonitor' -Message 'Repository fsmonitor and untracked cache were disabled locally.' -Detail $repositoryState.RepositoryPath
+        } catch {
+            Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not disable Git fsmonitor for $($repositoryState.RepositoryPath): $($_.Exception.Message)"
+            $records += New-CPanDiagnosticRecord -Type 'GitConfig' -Severity 'Warning' -Name 'Git fsmonitor' -Message 'Repository fsmonitor could not be disabled.' -Detail $_.Exception.Message
+        }
+    }
+
+    try {
+        Clear-DnsClientCache -ErrorAction Stop
+        $records += New-CPanDiagnosticRecord -Type 'PerformanceDns' -Severity 'Info' -Name 'Clear-DnsClientCache' -Message 'DNS resolver cache was flushed.' -Detail ''
+    } catch {
+        $records += New-CPanDiagnosticRecord -Type 'PerformanceDns' -Severity 'Warning' -Name 'Clear-DnsClientCache' -Message 'DNS resolver cache could not be flushed.' -Detail $_.Exception.Message
+    }
+
+    try {
+        $output = & ipconfig.exe /flushdns 2>&1
+        $severity = if ($LASTEXITCODE -eq 0) { 'Info' } else { 'Warning' }
+        $records += New-CPanDiagnosticRecord -Type 'PerformanceDns' -Severity $severity -Name 'ipconfig /flushdns' -Message 'ipconfig DNS flush was requested.' -Detail (($output | Out-String).Trim())
+    } catch {
+        $records += New-CPanDiagnosticRecord -Type 'PerformanceDns' -Severity 'Warning' -Name 'ipconfig /flushdns' -Message 'ipconfig DNS flush failed.' -Detail $_.Exception.Message
+    }
+
+    foreach ($process in $priorityProcesses) {
+        try {
+            $oldPriority = $process.PriorityClass
+            $process.PriorityClass = 'BelowNormal'
+            Write-CPanLog -Context $Context -Level 'INFO' -Message "Set priority BelowNormal for $($process.ProcessName) PID=$($process.Id)."
+            $records += New-CPanDiagnosticRecord -Type 'PerformancePriority' -Severity 'Info' -Name $process.ProcessName -Id $process.Id -Message 'Process priority was set to BelowNormal.' -Detail ('OldPriority={0}; Path={1}' -f $oldPriority, $process.Path)
+        } catch {
+            Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not set priority for $($process.ProcessName) PID=$($process.Id): $($_.Exception.Message)"
+            $records += New-CPanDiagnosticRecord -Type 'PerformancePriority' -Severity 'Warning' -Name $process.ProcessName -Id $process.Id -Message 'Process priority could not be changed.' -Detail $_.Exception.Message
+        }
+    }
+
+    return $records
+}
+
+function Invoke-CPanDisableWindowsUpdateDownloads {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context,
+
+        [switch] $Apply,
+
+        [bool] $IsAdmin
+    )
+
+    $records = @()
+
+    foreach ($service in Get-CPanServiceControlSnapshot) {
+        $records += New-CPanDiagnosticRecord `
+            -Type 'WindowsUpdateService' `
+            -Severity 'Info' `
+            -Name $service.Name `
+            -Message 'Current service state.' `
+            -Detail ("Status={0}; StartType={1}; DisplayName={2}" -f $service.Status, $service.StartType, $service.DisplayName)
+    }
+
+    $policyPlans = @(
+        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DisableWindowsUpdateAccess'; Value = 1 },
+        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'SetDisableUXWUAccess'; Value = 1 },
+        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DoNotConnectToWindowsUpdateInternetLocations'; Value = 1 },
+        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'ExcludeWUDriversInQualityUpdate'; Value = 1 },
+        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'NoAutoUpdate'; Value = 1 },
+        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'AUOptions'; Value = 2 },
+        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization'; Name = 'DODownloadMode'; Value = 0 }
+    )
+    $servicePlans = @(
+        [pscustomobject]@{ Name = 'UsoSvc'; Start = 'disabled'; Stop = $true },
+        [pscustomobject]@{ Name = 'wuauserv'; Start = 'disabled'; Stop = $true },
+        [pscustomobject]@{ Name = 'DoSvc'; Start = 'disabled'; Stop = $true },
+        [pscustomobject]@{ Name = 'WaaSMedicSvc'; Start = 'disabled'; Stop = $true },
+        [pscustomobject]@{ Name = 'bits'; Start = '<unchanged>'; Stop = $false }
+    )
+    $taskPlans = @(
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\WindowsUpdate\'; TaskName = 'Scheduled Start' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\WindowsUpdate\'; TaskName = 'Refresh Group Policy Cache' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'Report policies' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'Schedule Maintenance Work' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'Schedule Scan' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'Schedule Scan Static Task' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'Schedule Wake To Work' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'Schedule Work' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'Start Oobe Expedite Work' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'StartOobeAppsScan' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'StartOobeAppsScan_LicenseAccepted' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'StartOobeAppsScanAfterUpdate' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'UIEOrchestrator' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'USO_UxBroker' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'UUS Failover Task' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\WaaSMedic\'; TaskName = 'DeferredWork' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\WaaSMedic\'; TaskName = 'MaintenanceWork' },
+        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\WaaSMedic\'; TaskName = 'PerformRemediation' }
+    )
+
+    if (-not $Apply) {
+        foreach ($plan in $policyPlans) {
+            $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name $plan.Name -Message 'Dry-run: policy value would be set.' -Detail ("{0}\{1}={2}" -f $plan.Path, $plan.Name, $plan.Value)
+        }
+        foreach ($plan in $servicePlans) {
+            $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name $plan.Name -Message 'Dry-run: service startup/stop policy would be applied.' -Detail ("Start={0}; Stop={1}" -f $plan.Start, $plan.Stop)
+        }
+        foreach ($plan in $taskPlans) {
+            $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name "$($plan.TaskPath)$($plan.TaskName)" -Message 'Dry-run: scheduled task disable would be attempted.' -Detail 'Protected tasks may return Access is denied.'
+        }
+        $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name 'BITS' -Message 'Dry-run: BITS jobs would be reset for all users.' -Detail 'BITS itself is left enabled because it is shared system infrastructure.'
+        $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name '\CPanCleaner\WindowsUpdateGuard' -Message 'Dry-run: persistent SYSTEM guard task would be installed.' -Detail 'Runs allowlisted reg.exe actions at startup plus every 5 minutes to re-apply Windows Update policy and service Start=4 controls.'
+        return $records
+    }
+
+    if (-not $IsAdmin) {
+        $records += New-CPanDiagnosticRecord -Type 'WindowsUpdateControl' -Severity 'Error' -Name 'Administrator' -Message 'Administrator rights are required to disable Windows Update downloads.' -Detail 'Run again as Administrator, or use -Elevate.'
+        return $records
+    }
+
+    foreach ($plan in $policyPlans) {
+        $records += Set-CPanRegistryDWord -Path $plan.Path -Name $plan.Name -Value $plan.Value -Context $Context
+    }
+
+    foreach ($plan in $servicePlans | Where-Object { $_.Start -eq 'disabled' }) {
+        $records += Set-CPanServiceStartRegistry -ServiceName $plan.Name -Start 4 -Context $Context
+    }
+
+    foreach ($plan in $servicePlans | Where-Object { $_.Start -ne '<unchanged>' }) {
+        $records += Invoke-CPanScCommand -Arguments @('config', $plan.Name, 'start=', $plan.Start) -Name $plan.Name -Message "Configured service $($plan.Name) start=$($plan.Start)." -Context $Context
+    }
+
+    foreach ($plan in $servicePlans | Where-Object { $_.Stop }) {
+        $records += Invoke-CPanScCommand -Arguments @('stop', $plan.Name) -Name $plan.Name -Message "Requested stop for service $($plan.Name)." -Context $Context
+    }
+
+    $records += Invoke-CPanBitsReset -Context $Context
+
+    foreach ($task in $taskPlans) {
+        $records += Disable-CPanWindowsUpdateTask -TaskPath $task.TaskPath -TaskName $task.TaskName -Context $Context
+    }
+
+    $records += Invoke-CPanSystemWindowsUpdateHardening -Context $Context
+    $records += Install-CPanWindowsUpdateGuardTask -Context $Context
+
+    Start-Sleep -Seconds 2
+    foreach ($service in Get-CPanServiceControlSnapshot) {
+        $records += New-CPanDiagnosticRecord `
+            -Type 'WindowsUpdateVerification' `
+            -Severity 'Info' `
+            -Name $service.Name `
+            -Message 'Post-action service state.' `
+            -Detail ("Status={0}; StartType={1}; DisplayName={2}" -f $service.Status, $service.StartType, $service.DisplayName)
+    }
+
+    return $records
 }
 
 function Stop-CPanNetLimiterService {
@@ -1063,7 +1841,7 @@ function Get-CPanDiagnostics {
 function Invoke-CPanCleaner {
     [CmdletBinding()]
     param(
-        [ValidateSet('Scan', 'Clean', 'Diagnose')]
+        [ValidateSet('Scan', 'Clean', 'Diagnose', 'DisableWindowsUpdate', 'OptimizePerformance')]
         [string] $Action = 'Scan',
 
         [string[]] $Include = @('Default'),
@@ -1094,6 +1872,10 @@ function Invoke-CPanCleaner {
 
     if ($Action -eq 'Diagnose') {
         $diagnostics = @(Get-CPanDiagnostics -RepositoryPath $RepositoryPath)
+    } elseif ($Action -eq 'DisableWindowsUpdate') {
+        $diagnostics = @(Invoke-CPanDisableWindowsUpdateDownloads -Context $context -Apply:$effectiveApply -IsAdmin $isAdmin)
+    } elseif ($Action -eq 'OptimizePerformance') {
+        $diagnostics = @(Invoke-CPanOptimizePerformance -Context $context -RepositoryPath $RepositoryPath -Apply:$effectiveApply)
     } else {
         $targets = @(Get-CPanCleanerTarget -Include $Include)
         if ($Action -eq 'Scan') {
@@ -1127,7 +1909,7 @@ function Invoke-CPanCleaner {
     $summary = [pscustomobject]@{
         Version = $script:CleanerVersion
         Action = $Action
-        Mode = if ($Action -eq 'Clean' -and $effectiveApply) { 'Apply' } elseif ($Action -eq 'Clean') { 'DryRun' } else { 'ReadOnly' }
+        Mode = if (($Action -eq 'Clean' -or $Action -eq 'DisableWindowsUpdate' -or $Action -eq 'OptimizePerformance') -and $effectiveApply) { 'Apply' } elseif ($Action -eq 'Clean' -or $Action -eq 'DisableWindowsUpdate' -or $Action -eq 'OptimizePerformance') { 'DryRun' } else { 'ReadOnly' }
         IsAdministrator = $isAdmin
         Include = ($Include -join ',')
         MinimumAgeDays = $MinimumAgeDays

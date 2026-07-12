@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Scan', 'Clean', 'Diagnose')]
+    [ValidateSet('Scan', 'Clean', 'Diagnose', 'DisableWindowsUpdate', 'OptimizePerformance')]
     [string] $Action = 'Scan',
 
     [string[]] $Include = @('Default'),
@@ -98,4 +98,14 @@ if ($result.Diagnostics.Count -gt 0) {
 if ($result.Action -eq 'Clean' -and $result.Mode -eq 'DryRun') {
     Write-Host ''
     Write-Host 'Dry-run complete. Re-run with -Apply to remove the listed candidates.'
+}
+
+if ($result.Action -eq 'DisableWindowsUpdate' -and $result.Mode -eq 'DryRun') {
+    Write-Host ''
+    Write-Host 'Dry-run complete. Re-run with -Apply -Elevate to disable Windows Update automatic downloads.'
+}
+
+if ($result.Action -eq 'OptimizePerformance' -and $result.Mode -eq 'DryRun') {
+    Write-Host ''
+    Write-Host 'Dry-run complete. Re-run with -Apply to stop stale Git/Conda helpers, flush DNS, and lower noisy helper priorities.'
 }

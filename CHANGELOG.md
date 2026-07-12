@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Removed the `VisualStudioPackageCache` cleanup target and protected it from explicit `-Include` selection because deleting `C:\ProgramData\Microsoft\VisualStudio\Packages` can break Visual Studio instance/workload detection.
+- Updated `Run-Clean-Aggressive.bat` so it no longer cleans Visual Studio installer state or package caches.
+- Added `OptimizePerformance` action and `Run-Optimize-Performance.bat` for low-risk CPU relief: stop stale Git/Conda helpers, restart TortoiseGit cache when Git background work is looping, flush DNS, disable fsmonitor in affected local repositories, and lower noisy helper priorities.
+
+## 0.5.0 - 2026-07-12
+
+- Added `DisableWindowsUpdate` action for disabling Windows Update automatic download activity through explicit policy, service, BITS, and scheduled-task controls.
+- Hardened `DisableWindowsUpdate` with protected-service registry `Start=4` updates and a temporary SYSTEM scheduled task for protected UpdateOrchestrator/WaaSMedic tasks.
+- Added persistent SYSTEM guard task support through direct allowlisted registry actions to re-apply Windows Update disable controls after boot or service self-healing.
+- Added `Run-Disable-WindowsUpdate.bat` UAC entrypoint.
+- Added project skill notes under `skills/windows-update-control/SKILL.md` for diagnosing recurring Windows Update downloads.
+- Updated README and safety notes with the 2026-07-12 recurrence analysis: policy keys remained set, but update services and UpdateOrchestrator/WaaSMedic tasks had resumed activity.
+- Added dry-run static coverage for the new Windows Update disable action.
+
 ## 0.4.0 - 2026-07-11
 
 - Ported remaining prototype cleanup coverage into the modular project: Windows Error Reporting cache, debug symbol cache, current-user Internet cache, current-user crash dumps, and old Codex runtime cache directories.

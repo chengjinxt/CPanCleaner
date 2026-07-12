@@ -1,6 +1,8 @@
 logs/*.log
 logs/*.json
 logs/*.csv
+logs/*.ps1
+logs/*.txt
 CPanCleaner-*.log
 CPanCleaner-*.csv
 *.tmp
