@@ -58,6 +58,22 @@ Assert-True -Condition ($performanceOptimizePreview.Mode -eq 'DryRun') -Message 
 Assert-True -Condition ($performanceOptimizePreview.Items.Count -eq 0) -Message 'OptimizePerformance should not produce file cleanup items.'
 Assert-True -Condition (@($performanceOptimizePreview.Diagnostics | Where-Object { $_.Type -eq 'PerformanceCpu' -or $_.Type -eq 'PlannedChange' -or $_.Type -eq 'PerformanceOptimization' }).Count -gt 0) -Message 'OptimizePerformance dry-run should report performance diagnostics or planned changes.'
 
+$performancePreventPreview = Invoke-CPanCleaner -Action PreventPerformanceSpikes -DryRun -Quiet
+Assert-True -Condition ($performancePreventPreview.Mode -eq 'DryRun') -Message 'PreventPerformanceSpikes should default to dry-run mode without -Apply.'
+Assert-True -Condition ($performancePreventPreview.Items.Count -eq 0) -Message 'PreventPerformanceSpikes should not produce file cleanup items.'
+Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq '\CPanCleaner\PerformanceGuard' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan the performance guard task.'
+Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq 'TGitCacheCheckContentMaxSize' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan TortoiseGit content hashing reduction.'
+Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq 'core.fsmonitor' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan global Git fsmonitor hardening.'
+
+$moduleSource = Get-Content -LiteralPath $modulePath -Raw -Encoding UTF8
+Assert-True -Condition ($moduleSource -match 'git-remote-https\.exe') -Message 'Performance optimization should recognize git-remote-https.exe helpers.'
+Assert-True -Condition ($moduleSource -match 'git remote-https') -Message 'Performance optimization should match Git remote HTTPS command lines.'
+Assert-True -Condition ($moduleSource -match 'remote-https') -Message 'Performance optimization should match remote-https helper command lines.'
+Assert-True -Condition ($moduleSource -match 'ApproxTotalCpuPercent -ge 5') -Message 'Performance optimization should handle hot TGitCache shell-cache CPU loops.'
+Assert-True -Condition ($moduleSource -match "Type = 'GitShellCache'") -Message 'Diagnose should report TortoiseGit shell cache helper presence.'
+Assert-True -Condition ($moduleSource -match 'PreventPerformanceSpikes') -Message 'Persistent performance prevention action should be exposed.'
+Assert-True -Condition ($moduleSource -match 'TGitCacheCheckContentMaxSize') -Message 'Persistent performance prevention should configure TortoiseGit content hashing limit.'
+
 $forbiddenFragments = @(
     '\Documents',
     '\Downloads',

@@ -116,14 +116,29 @@ Real cleanup requires administrator rights. CPanCleaner attempts to stop `NLSvc`
 
 The action is intentionally narrow:
 
-- Stop stale Git background work matching `fsmonitor--daemon run`, `git fetch`, or `git remote-http`.
-- Stop `TGitCache.exe` only when stale Git background work is found, so TortoiseGit shell caching can restart cleanly instead of continuing a scan loop.
+- Stop stale Git background work matching `fsmonitor--daemon run`, `git fetch`, `git remote-http`, or `git remote-https`.
+- Stop `TGitCache.exe` when stale Git background work is found or when a lightweight CPU sample shows TortoiseGit shell caching is already consuming about 5% or more of total CPU, so Explorer shell status caching can restart cleanly instead of continuing a scan loop.
 - Stop stuck Conda PowerShell helpers matching `conda-script.py shell.powershell hook/activate`.
 - Flush DNS resolver cache with `Clear-DnsClientCache` and `ipconfig /flushdns`.
-- Set known noisy network/sync helper priorities to `BelowNormal`: `NLSvc`, `FlClash`, `FlClashCore`, `SDPProxyClient`, `CmicSDPAccessAgent*`, `wpscloudsvr`, and `syncDisk`.
+- Set known noisy network/sync/vendor/helper priorities to `BelowNormal`: `NLSvc`, `FlClash`, `FlClashCore`, `SDPProxyClient`, `CmicSDPAccessAgent*`, `Lenovo.Modern.ImController*`, `UsbClientService`, `SmpHelp`, `AweSun`, `awesun_guard`, `WXWorkWeb`, `WeMail`, `Codex`, `wps`, `wpspdf`, `et`, `wpscloudsvr`, `mCloud`, `mountSpace`, `uploadDownload`, `backupDisk`, `MirrorServer`, `SyncMirrorServer`, `syncDisk`, and `SpaceAgent`.
 - Disable `core.fsmonitor` and `core.untrackedCache` in the current `-RepositoryPath` repository and same-parent repositories that already have `.git\fsmonitor--daemon` state. Repositories without daemon state are not bulk-modified.
 
 It does not terminate `System`, `svchost`, `WmiPrvSE`, Codex, chat apps, active TortoiseGit command windows, or unknown user processes. It does not disable services, delete files, or change global Git configuration.
+
+## Performance Spike Prevention
+
+`PreventPerformanceSpikes` is a persistent prevention action for machines where Explorer/TortoiseGit, Git fsmonitor, proxy, NetLimiter, and sync helpers repeatedly combine into high CPU. It defaults to dry-run mode; real changes require `-Apply`.
+
+The action may:
+
+- Set current-user global Git config `core.fsmonitor=false` and `core.untrackedCache=false`.
+- Set the same two local Git config values for the current `-RepositoryPath` repository and same-parent repositories that already have `.git\fsmonitor--daemon` state.
+- Set TortoiseGit current-user registry values under `HKCU\Software\TortoiseGit`: `TGitCacheCheckContentMaxSize=0`, `BlockStatus=1`, `CacheSave=0`, and `ModifyExplorerTitle=0`.
+- Install `\CPanCleaner\PerformanceGuard`, a SYSTEM scheduled task that runs at startup and every 5 minutes to set known background helpers to `BelowNormal` priority.
+- Stop only Codex/OpenAI plugin Git probes whose command line explicitly contains `github.com/openai/plugins.git`; ordinary user Git operations are left alone.
+- Restart `TGitCache.exe` once during apply so the new TortoiseGit cache settings can take effect.
+
+It does not disable TortoiseGit, Git, NetLimiter, FlClash, CmicSDP, WPS, Windows services, or Explorer. It does not remove files and does not change global Windows service startup policy.
 
 ## Visual Studio Package Cache
 
@@ -154,7 +169,8 @@ Each run writes a log and, when file-system targets are scanned or cleaned, a CS
 
 `-Action Diagnose` is read-only. It reports:
 
-- Git background fetch or fsmonitor processes.
+- Git background fetch, fsmonitor, or remote HTTP(S) helper processes.
+- TortoiseGit shell cache helper presence, because a hot `TGitCache.exe` can block Explorer desktop/file interactions while icon overlays and repository state are recalculated.
 - Conda PowerShell initialization helper processes.
 - Local repository `core.fsmonitor` and `core.untrackedCache` settings when a repository path is available.
 

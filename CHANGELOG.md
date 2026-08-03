@@ -5,6 +5,11 @@
 - Removed the `VisualStudioPackageCache` cleanup target and protected it from explicit `-Include` selection because deleting `C:\ProgramData\Microsoft\VisualStudio\Packages` can break Visual Studio instance/workload detection.
 - Updated `Run-Clean-Aggressive.bat` so it no longer cleans Visual Studio installer state or package caches.
 - Added `OptimizePerformance` action and `Run-Optimize-Performance.bat` for low-risk CPU relief: stop stale Git/Conda helpers, restart TortoiseGit cache when Git background work is looping, flush DNS, disable fsmonitor in affected local repositories, and lower noisy helper priorities.
+- Expanded `OptimizePerformance` and `Diagnose` for Explorer/TortoiseGit lag incidents by detecting `git remote-https` helpers and hot `TGitCache.exe` shell-cache CPU loops.
+- Added `PreventPerformanceSpikes` action and `Run-Prevent-Performance-Spikes.bat` to persist Git/TortoiseGit performance settings and install a background-helper priority guard task.
+- Expanded the performance priority guard to include observed mCloud/mount-space/upload-download/backup-disk and SpaceAgent sync helpers that can otherwise run at High or AboveNormal priority.
+- Expanded the performance priority guard to include Lenovo ImController, Synology USB helper, SmpHelp, AweSun, WXWorkWeb, and WeMail after observing them contributing to foreground lag.
+- Expanded the performance priority guard to lower Codex/WPS helpers and stop only Codex/OpenAI plugin Git probes that target `github.com/openai/plugins.git`.
 
 ## 0.5.0 - 2026-07-12
 

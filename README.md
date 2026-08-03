@@ -225,11 +225,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Di
 
 当前动作只做低风险优化：
 
-- 停止残留的 `git fsmonitor--daemon run --detach --ipc-threads=8`、`git fetch`、`git remote-http` 后台进程。
-- 当发现上述 Git 后台异常时，同时停止 `TGitCache.exe`，让 TortoiseGit 外壳缓存重新拉起，避免它继续循环触发 Git 状态扫描。
+- 停止残留的 `git fsmonitor--daemon run --detach --ipc-threads=8`、`git fetch`、`git remote-http`、`git remote-https` 后台进程。
+- 当发现上述 Git 后台异常，或 `TGitCache.exe` 自身已在轻量 CPU 采样中明显占用总 CPU 时，停止 `TGitCache.exe`，让 TortoiseGit 外壳缓存重新拉起，避免它继续循环触发 Git 状态扫描并拖住 Explorer 桌面/文件点击。
 - 停止卡住的 Conda PowerShell 初始化 helper：`conda-script.py shell.powershell hook/activate`。
 - 刷新 DNS 缓存，缓解 `Dnscache` 因代理/网络抖动导致的持续占用。
-- 将已知网络/同步 helper 进程降到 `BelowNormal`：`NLSvc`、`FlClash`、`FlClashCore`、`SDPProxyClient`、`CmicSDPAccessAgent*`、`wpscloudsvr`、`syncDisk`。
+- 将已知网络/同步/厂商管理 helper 进程降到 `BelowNormal`：`NLSvc`、`FlClash`、`FlClashCore`、`SDPProxyClient`、`CmicSDPAccessAgent*`、`Lenovo.Modern.ImController*`、`UsbClientService`、`SmpHelp`、`AweSun`、`awesun_guard`、`WXWorkWeb`、`WeMail`、`Codex`、`wps`、`wpspdf`、`et`、`wpscloudsvr`、`mCloud`、`mountSpace`、`uploadDownload`、`backupDisk`、`MirrorServer`、`SyncMirrorServer`、`syncDisk`、`SpaceAgent`。
 - 当当前 `-RepositoryPath` 仓库或同级源码目录中出现 `.git\fsmonitor--daemon` 痕迹时，写入对应仓库的本地配置：`core.fsmonitor=false`、`core.untrackedCache=false`。未出现 daemon 痕迹的其它仓库不会被批量改配置。
 
 它不会杀 `System`、`svchost`、`WmiPrvSE`、`Codex`、微信/企业微信主进程，也不会禁用服务或删除文件；Git 配置只改当前 `-RepositoryPath` 仓库和同级目录中已有 daemon 痕迹的仓库，不改全局配置。
@@ -244,6 +244,30 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Op
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action OptimizePerformance -Apply
+```
+
+## CPU/卡顿防复发
+
+`PreventPerformanceSpikes` 用于把高 CPU/Explorer 卡顿的常见触发链路提前压住。它和 `OptimizePerformance` 的区别是：`OptimizePerformance` 处理已经发生的卡顿；`PreventPerformanceSpikes` 写入持久设置，目标是降低复发概率。
+
+该动作默认 dry-run，真实修改必须传入 `-Apply`。当前会做这些持久化处理：
+
+- 将当前用户的全局 Git 配置设为 `core.fsmonitor=false` 和 `core.untrackedCache=false`，避免新仓库或未覆盖仓库再次拉起高 CPU fsmonitor 链路。
+- 对当前 `-RepositoryPath` 仓库及同级目录中已有 `.git\fsmonitor--daemon` 痕迹的仓库，继续写入本地 `core.fsmonitor=false`、`core.untrackedCache=false`。
+- 写入 TortoiseGit 高负载防护设置：`TGitCacheCheckContentMaxSize=0`、`BlockStatus=1`、`CacheSave=0`、`ModifyExplorerTitle=0`，降低 Explorer 外壳状态缓存、内容哈希和标题状态刷新带来的负载。
+- 安装 `\CPanCleaner\PerformanceGuard` 计划任务：开机和每 5 分钟把 `NLSvc`、`FlClash`、`FlClashCore`、`SDPProxyClient`、`CmicSDPAccessAgent*`、`Lenovo.Modern.ImController*`、`UsbClientService`、`SmpHelp`、`AweSun`、`awesun_guard`、`WXWorkWeb`、`WeMail`、`Codex`、`wps`、`wpspdf`、`et`、`wpscloudsvr`、`mCloud`、`mountSpace`、`uploadDownload`、`backupDisk`、`MirrorServer`、`SyncMirrorServer`、`syncDisk`、`SpaceAgent`、`TGitCache` 这类后台 helper 设为 `BelowNormal`，并清理明确指向 `github.com/openai/plugins.git` 的 Codex 插件 Git 探测进程。
+- 应用时会让 `TGitCache.exe` 重启一次，以便新 TortoiseGit 设置生效；不会重启 Explorer，不会禁用系统服务。
+
+预览防复发动作：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action PreventPerformanceSpikes -DryRun
+```
+
+执行防复发动作：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action PreventPerformanceSpikes -Apply -Elevate
 ```
 
 输出 JSON：
@@ -262,6 +286,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Sc
 | `Run-Clean-Safe.bat` | 执行默认低风险清理 | 只处理默认目标。 |
 | `Run-Disable-WindowsUpdate.bat` | 禁用 Windows 自动下载升级 | 会触发 UAC；修改 Windows Update 策略、服务和计划任务。 |
 | `Run-Optimize-Performance.bat` | 降低高 CPU/卡顿 | 停止 stale Git/Conda/TortoiseGit cache helper、刷新 DNS、降低网络/同步 helper 优先级；不杀系统进程。 |
+| `Run-Prevent-Performance-Spikes.bat` | 防止高 CPU/卡顿复发 | 会触发 UAC；写入 Git/TortoiseGit 持久设置并安装后台 helper 降优先级守护任务。 |
 | `Run-Clean-NetLimiter.bat` | 清理 NetLimiter 历史流量统计数据库 | 会触发 UAC；会丢失 NetLimiter 历史流量统计。 |
 | `Run-Clean-Aggressive.bat` | 清理 Windows Update、Delivery Optimization、旧隔离目录和 NetLimiter 统计库 | 会触发 UAC；不包含回收站和 Visual Studio 安装器缓存，避免误删用户文件或破坏开发环境依赖。 |
 
@@ -351,6 +376,12 @@ CPU/卡顿优化 dry-run 验证：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action OptimizePerformance -DryRun -Json
+```
+
+CPU/卡顿防复发 dry-run 验证：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action PreventPerformanceSpikes -DryRun -Json
 ```
 
 诊断入口验证：

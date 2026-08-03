@@ -1056,9 +1056,94 @@ function Get-CPanPerformancePriorityProcessNames {
         'CmicSDPAccessAgent',
         'CmicSDPAccessAgentDaemon',
         'CmicSDPAccessAgentTray',
+        'Lenovo.Modern.ImController',
+        'Lenovo.Modern.ImController.PluginHost.Device',
+        'UsbClientService',
+        'SmpHelp',
+        'AweSun',
+        'awesun_guard',
+        'WXWorkWeb',
+        'WeMail',
+        'Codex',
+        'codex',
+        'wps',
+        'wpspdf',
+        'et',
         'wpscloudsvr',
-        'syncDisk'
+        'mCloud',
+        'mountSpace',
+        'uploadDownload',
+        'backupDisk',
+        'MirrorServer',
+        'SyncMirrorServer',
+        'syncDisk',
+        'SpaceAgent'
     )
+}
+
+function Get-CPanPerformanceGuardProcessNames {
+    return @(
+        @(Get-CPanPerformancePriorityProcessNames),
+        @('TGitCache')
+    ) | ForEach-Object { $_ } | Sort-Object -Unique
+}
+
+function Measure-CPanProcessCpuUsage {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]] $Name,
+
+        [int] $SampleMilliseconds = 1000
+    )
+
+    $cores = [Environment]::ProcessorCount
+    if ($cores -lt 1) {
+        $cores = 1
+    }
+
+    $firstSamples = @{}
+    foreach ($processName in $Name) {
+        Get-Process -Name $processName -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($null -ne $_.CPU) {
+                $firstSamples[$_.Id] = [pscustomobject]@{
+                    Id = $_.Id
+                    ProcessName = $_.ProcessName
+                    Cpu = [double] $_.CPU
+                    Path = $_.Path
+                }
+            }
+        }
+    }
+
+    if ($firstSamples.Count -eq 0) {
+        return @()
+    }
+
+    Start-Sleep -Milliseconds $SampleMilliseconds
+
+    $intervalSeconds = [math]::Max(($SampleMilliseconds / 1000.0), 0.001)
+    $ids = @($firstSamples.Keys | ForEach-Object { [int] $_ })
+    $measurements = @()
+
+    Get-Process -Id $ids -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($null -ne $_.CPU -and $firstSamples.ContainsKey($_.Id)) {
+            $first = $firstSamples[$_.Id]
+            $deltaCpuSeconds = ([double] $_.CPU) - $first.Cpu
+            if ($deltaCpuSeconds -ge 0) {
+                $rawPercent = [math]::Round(($deltaCpuSeconds / $intervalSeconds) * 100, 2)
+                $approxTotalPercent = [math]::Round($rawPercent / $cores, 2)
+                $measurements += [pscustomobject]@{
+                    ProcessName = $_.ProcessName
+                    Id = $_.Id
+                    RawCpuPercent = $rawPercent
+                    ApproxTotalCpuPercent = $approxTotalPercent
+                    Path = $first.Path
+                }
+            }
+        }
+    }
+
+    return $measurements
 }
 
 function Get-CPanPerformanceProcessCandidates {
@@ -1066,13 +1151,14 @@ function Get-CPanPerformanceProcessCandidates {
         Git = @()
         Conda = @()
         GitShellCache = @()
+        GitShellCacheCpu = @()
     }
 
     try {
         $processes = Get-CimInstance Win32_Process -ErrorAction Stop
         $records.Git = @($processes | Where-Object {
-            ($_.Name -eq 'git.exe' -or $_.Name -eq 'git-remote-http.exe') -and
-            $_.CommandLine -match 'fsmonitor--daemon run|git fetch|git remote-http'
+            ($_.Name -eq 'git.exe' -or $_.Name -eq 'git-remote-http.exe' -or $_.Name -eq 'git-remote-https.exe') -and
+            $_.CommandLine -match 'fsmonitor--daemon run|git fetch|git remote-http|git remote-https|remote-http|remote-https'
         })
         $records.Conda = @($processes | Where-Object {
             $_.Name -eq 'python.exe' -and
@@ -1081,6 +1167,7 @@ function Get-CPanPerformanceProcessCandidates {
         $records.GitShellCache = @($processes | Where-Object {
             $_.Name -eq 'TGitCache.exe'
         })
+        $records.GitShellCacheCpu = @(Measure-CPanProcessCpuUsage -Name @('TGitCache') -SampleMilliseconds 1000)
     } catch {
         $records.QueryError = $_.Exception.Message
     }
@@ -1258,9 +1345,13 @@ function Invoke-CPanOptimizePerformance {
 
     $gitProcesses = @($candidates.Git)
     $condaProcesses = @($candidates.Conda)
+    $gitShellCacheCpu = @($candidates.GitShellCacheCpu)
+    $hotGitShellCacheIds = @($gitShellCacheCpu | Where-Object { $_.ApproxTotalCpuPercent -ge 5 } | Select-Object -ExpandProperty Id)
     $gitShellCacheProcesses = @()
     if ($gitProcesses.Count -gt 0) {
         $gitShellCacheProcesses = @($candidates.GitShellCache)
+    } elseif ($hotGitShellCacheIds.Count -gt 0) {
+        $gitShellCacheProcesses = @($candidates.GitShellCache | Where-Object { $hotGitShellCacheIds -contains $_.ProcessId })
     }
     $repositoryStates = @(Get-CPanNearbyGitPerformanceRepositoryStates -RepositoryPath $RepositoryPath)
     $priorityNames = Get-CPanPerformancePriorityProcessNames
@@ -1277,7 +1368,15 @@ function Invoke-CPanOptimizePerformance {
             $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name $process.Name -Id $process.ProcessId -Message 'Dry-run: stuck Conda PowerShell helper would be stopped.' -Detail $process.CommandLine
         }
         foreach ($process in $gitShellCacheProcesses) {
-            $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name $process.Name -Id $process.ProcessId -Message 'Dry-run: TortoiseGit cache helper would be stopped because stale Git background work was found.' -Detail $process.CommandLine
+            $cpu = @($gitShellCacheCpu | Where-Object { $_.Id -eq $process.ProcessId } | Select-Object -First 1)
+            $reason = if ($gitProcesses.Count -gt 0) {
+                'stale Git background work was found'
+            } elseif ($cpu.Count -gt 0) {
+                ('TGitCache is currently using about {0}% of total CPU' -f $cpu[0].ApproxTotalCpuPercent)
+            } else {
+                'TortoiseGit shell cache appears to be active during a performance run'
+            }
+            $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name $process.Name -Id $process.ProcessId -Message ('Dry-run: TortoiseGit cache helper would be stopped because {0}.' -f $reason) -Detail $process.CommandLine
         }
         foreach ($process in $priorityProcesses) {
             $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name $process.ProcessName -Id $process.Id -Message 'Dry-run: process priority would be set to BelowNormal.' -Detail ('CurrentPriority={0}; Path={1}' -f $process.PriorityClass, $process.Path)
@@ -1352,6 +1451,307 @@ function Invoke-CPanOptimizePerformance {
         } catch {
             Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not set priority for $($process.ProcessName) PID=$($process.Id): $($_.Exception.Message)"
             $records += New-CPanDiagnosticRecord -Type 'PerformancePriority' -Severity 'Warning' -Name $process.ProcessName -Id $process.Id -Message 'Process priority could not be changed.' -Detail $_.Exception.Message
+        }
+    }
+
+    return $records
+}
+
+function Get-CPanPerformanceHardeningRegistryPlans {
+    return @(
+        [pscustomobject]@{
+            Path = 'HKCU:\Software\TortoiseGit'
+            NativePath = 'HKCU\Software\TortoiseGit'
+            Name = 'TGitCacheCheckContentMaxSize'
+            Value = 0
+            Message = 'Disable TortoiseGit shell-cache content hashing so Explorer status overlays use metadata instead of reading file contents.'
+        },
+        [pscustomobject]@{
+            Path = 'HKCU:\Software\TortoiseGit'
+            NativePath = 'HKCU\Software\TortoiseGit'
+            Name = 'BlockStatus'
+            Value = 1
+            Message = 'Block shell status refresh while TortoiseGit commands are running, reducing Explorer status churn during Git operations.'
+        },
+        [pscustomobject]@{
+            Path = 'HKCU:\Software\TortoiseGit'
+            NativePath = 'HKCU\Software\TortoiseGit'
+            Name = 'CacheSave'
+            Value = 0
+            Message = 'Avoid persisting TortoiseGit cache state to disk between sessions.'
+        },
+        [pscustomobject]@{
+            Path = 'HKCU:\Software\TortoiseGit'
+            NativePath = 'HKCU\Software\TortoiseGit'
+            Name = 'ModifyExplorerTitle'
+            Value = 0
+            Message = 'Disable TortoiseGit Explorer-title enrichment to avoid extra repository status work in Explorer windows.'
+        }
+    )
+}
+
+function Get-CPanRegistryValueText {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Name
+    )
+
+    try {
+        $item = Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
+        $value = $item.$Name
+        if ($null -eq $value) {
+            return '<unset>'
+        }
+        return [string] $value
+    } catch {
+        return '<unset>'
+    }
+}
+
+function Set-CPanPerformanceRegistryDWord {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Plan,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context
+    )
+
+    try {
+        $oldValue = Get-CPanRegistryValueText -Path $Plan.Path -Name $Plan.Name
+        $output = & reg.exe add $Plan.NativePath /v $Plan.Name /t REG_DWORD /d $Plan.Value /f 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw (($output | Out-String).Trim())
+        }
+        Write-CPanLog -Context $Context -Level 'INFO' -Message "Set performance registry value $($Plan.Path)\$($Plan.Name)=$($Plan.Value)."
+        return New-CPanDiagnosticRecord -Type 'PerformanceHardening' -Severity 'Info' -Name $Plan.Name -Message 'Performance registry value was set.' -Detail ("OldValue={0}; NewValue={1}; {2}" -f $oldValue, $Plan.Value, $Plan.Message)
+    } catch {
+        Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not set performance registry value $($Plan.Path)\$($Plan.Name): $($_.Exception.Message)"
+        return New-CPanDiagnosticRecord -Type 'PerformanceHardening' -Severity 'Warning' -Name $Plan.Name -Message 'Performance registry value could not be set.' -Detail $_.Exception.Message
+    }
+}
+
+function Get-CPanGitGlobalConfigValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Name
+    )
+
+    try {
+        $value = & git config --global --get $Name 2>$null
+        if ($LASTEXITCODE -eq 0 -and $value) {
+            return [string] $value
+        }
+    } catch {
+    }
+
+    return '<unset>'
+}
+
+function Set-CPanGitGlobalFalse {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Name,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context
+    )
+
+    $oldValue = Get-CPanGitGlobalConfigValue -Name $Name
+    try {
+        & git config --global $Name false
+        if ($LASTEXITCODE -ne 0) {
+            throw "git config --global $Name false failed."
+        }
+        Write-CPanLog -Context $Context -Level 'INFO' -Message "Set global Git config $Name=false."
+        return New-CPanDiagnosticRecord -Type 'PerformanceHardening' -Severity 'Info' -Name $Name -Message 'Global Git performance config was set.' -Detail ("OldValue={0}; NewValue=false" -f $oldValue)
+    } catch {
+        Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not set global Git config ${Name}: $($_.Exception.Message)"
+        return New-CPanDiagnosticRecord -Type 'PerformanceHardening' -Severity 'Warning' -Name $Name -Message 'Global Git performance config could not be set.' -Detail $_.Exception.Message
+    }
+}
+
+function Set-CPanRepositoryFsmonitorFalse {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $RepositoryState,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context
+    )
+
+    try {
+        & git -C $RepositoryState.RepositoryPath config core.fsmonitor false
+        if ($LASTEXITCODE -ne 0) {
+            throw 'git config core.fsmonitor false failed.'
+        }
+        & git -C $RepositoryState.RepositoryPath config core.untrackedCache false
+        if ($LASTEXITCODE -ne 0) {
+            throw 'git config core.untrackedCache false failed.'
+        }
+        Write-CPanLog -Context $Context -Level 'INFO' -Message "Disabled Git fsmonitor/untrackedCache for $($RepositoryState.RepositoryPath)."
+        return New-CPanDiagnosticRecord -Type 'GitConfig' -Severity 'Info' -Name 'Git fsmonitor' -Message 'Repository fsmonitor and untracked cache were disabled locally.' -Detail $RepositoryState.RepositoryPath
+    } catch {
+        Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not disable Git fsmonitor for $($RepositoryState.RepositoryPath): $($_.Exception.Message)"
+        return New-CPanDiagnosticRecord -Type 'GitConfig' -Severity 'Warning' -Name 'Git fsmonitor' -Message 'Repository fsmonitor could not be disabled.' -Detail $_.Exception.Message
+    }
+}
+
+function Get-CPanPerformanceGuardScriptPath {
+    $programData = if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramData' }
+    return (Join-Path $programData 'CPanCleaner\Set-PerformancePriority.ps1')
+}
+
+function Get-CPanPerformanceGuardScriptContent {
+    $namesLiteral = (Get-CPanPerformanceGuardProcessNames | ForEach-Object { "    '$($_)'" }) -join ",`r`n"
+    return @"
+`$ErrorActionPreference = 'SilentlyContinue'
+`$names = @(
+$namesLiteral
+)
+
+foreach (`$name in `$names) {
+    Get-Process -Name `$name -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+            `$_.PriorityClass = 'BelowNormal'
+        } catch {
+        }
+    }
+}
+
+try {
+    Get-CimInstance Win32_Process -Filter "Name = 'git.exe' OR Name = 'git-remote-http.exe' OR Name = 'git-remote-https.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { `$_.CommandLine -match 'github\.com/openai/plugins\.git' } |
+        ForEach-Object {
+            try {
+                Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue
+            } catch {
+            }
+        }
+} catch {
+}
+"@
+}
+
+function Install-CPanPerformanceGuardTask {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context,
+
+        [Parameter(Mandatory = $true)]
+        [bool] $IsAdmin
+    )
+
+    if (-not $IsAdmin) {
+        return New-CPanDiagnosticRecord -Type 'PerformanceGuard' -Severity 'Error' -Name 'Administrator' -Message 'Administrator rights are required to install the performance guard scheduled task.' -Detail 'Run again as Administrator, or use -Elevate.'
+    }
+
+    $taskPath = '\CPanCleaner\'
+    $taskName = 'PerformanceGuard'
+    $scriptPath = Get-CPanPerformanceGuardScriptPath
+
+    try {
+        $scriptDirectory = Split-Path -Parent $scriptPath
+        New-Item -ItemType Directory -Force -Path $scriptDirectory | Out-Null
+        Set-Content -LiteralPath $scriptPath -Value (Get-CPanPerformanceGuardScriptContent) -Encoding UTF8
+
+        Unregister-ScheduledTask -TaskPath $taskPath -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $scriptPath)
+        $startupTrigger = New-ScheduledTaskTrigger -AtStartup
+        $repeatTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+
+        Register-ScheduledTask -TaskPath $taskPath -TaskName $taskName -Action $action -Trigger @($startupTrigger, $repeatTrigger) -Principal $principal -Settings $settings -Force | Out-Null
+        Start-ScheduledTask -TaskPath $taskPath -TaskName $taskName
+
+        $detail = "Script=$scriptPath; Processes=$((Get-CPanPerformanceGuardProcessNames) -join ','); Schedule=AtStartup+Every5Minutes"
+        Write-CPanLog -Context $Context -Level 'INFO' -Message "Installed CPanCleaner performance guard task. $detail"
+        return New-CPanDiagnosticRecord -Type 'PerformanceGuard' -Severity 'Info' -Name "$taskPath$taskName" -Message 'Performance guard scheduled task was installed and started.' -Detail $detail
+    } catch {
+        Write-CPanLog -Context $Context -Level 'WARN' -Message "Could not install performance guard task: $($_.Exception.Message)"
+        return New-CPanDiagnosticRecord -Type 'PerformanceGuard' -Severity 'Warning' -Name "$taskPath$taskName" -Message 'Performance guard scheduled task could not be installed.' -Detail $_.Exception.Message
+    }
+}
+
+function Invoke-CPanPreventPerformanceSpikes {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context,
+
+        [string] $RepositoryPath,
+
+        [switch] $Apply,
+
+        [bool] $IsAdmin
+    )
+
+    $records = @(Get-CPanPerformanceSnapshot)
+    $registryPlans = @(Get-CPanPerformanceHardeningRegistryPlans)
+    $repositoryStates = @(Get-CPanNearbyGitPerformanceRepositoryStates -RepositoryPath $RepositoryPath)
+    $globalGitNames = @('core.fsmonitor', 'core.untrackedCache')
+    $guardNames = @(Get-CPanPerformanceGuardProcessNames)
+
+    if (-not $Apply) {
+        foreach ($name in $globalGitNames) {
+            $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name $name -Message 'Dry-run: global Git config would be set to false.' -Detail ("OldValue={0}; NewValue=false" -f (Get-CPanGitGlobalConfigValue -Name $name))
+        }
+
+        foreach ($repositoryState in $repositoryStates) {
+            $records += New-CPanDiagnosticRecord -Type 'GitConfig' -Severity 'Info' -Name 'Repository' -Message 'Repository Git performance state.' -Detail ("Path={0}; core.fsmonitor={1}; core.untrackedCache={2}; DaemonState={3}" -f $repositoryState.RepositoryPath, $repositoryState.FsMonitor, $repositoryState.UntrackedCache, $repositoryState.HasDaemonState)
+            if (Test-CPanShouldDisableRepositoryFsmonitor -RepositoryState $repositoryState) {
+                $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name 'Git fsmonitor' -Message 'Dry-run: repository fsmonitor and untracked cache would be disabled locally.' -Detail $repositoryState.RepositoryPath
+            }
+        }
+
+        foreach ($plan in $registryPlans) {
+            $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name $plan.Name -Message 'Dry-run: TortoiseGit performance registry value would be set.' -Detail ("OldValue={0}; NewValue={1}; {2}" -f (Get-CPanRegistryValueText -Path $plan.Path -Name $plan.Name), $plan.Value, $plan.Message)
+        }
+
+        $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name '\CPanCleaner\PerformanceGuard' -Message 'Dry-run: performance guard scheduled task would be installed.' -Detail ("Processes={0}; Schedule=AtStartup+Every5Minutes; RequiresAdmin={1}" -f ($guardNames -join ','), $true)
+        $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name 'Current helper priorities' -Message 'Dry-run: currently running known background helpers would be set to BelowNormal once.' -Detail ($guardNames -join ',')
+        return $records
+    }
+
+    foreach ($name in $globalGitNames) {
+        $records += Set-CPanGitGlobalFalse -Name $name -Context $Context
+    }
+
+    foreach ($repositoryState in $repositoryStates) {
+        if (Test-CPanShouldDisableRepositoryFsmonitor -RepositoryState $repositoryState) {
+            $records += Set-CPanRepositoryFsmonitorFalse -RepositoryState $repositoryState -Context $Context
+        }
+    }
+
+    foreach ($plan in $registryPlans) {
+        $records += Set-CPanPerformanceRegistryDWord -Plan $plan -Context $Context
+    }
+
+    $records += Install-CPanPerformanceGuardTask -Context $Context -IsAdmin $IsAdmin
+
+    foreach ($name in $guardNames) {
+        Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                $oldPriority = $_.PriorityClass
+                $_.PriorityClass = 'BelowNormal'
+                $records += New-CPanDiagnosticRecord -Type 'PerformancePriority' -Severity 'Info' -Name $_.ProcessName -Id $_.Id -Message 'Current process priority was set to BelowNormal.' -Detail ('OldPriority={0}; Path={1}' -f $oldPriority, $_.Path)
+            } catch {
+                $records += New-CPanDiagnosticRecord -Type 'PerformancePriority' -Severity 'Warning' -Name $_.ProcessName -Id $_.Id -Message 'Current process priority could not be changed.' -Detail $_.Exception.Message
+            }
+        }
+    }
+
+    $tgitCacheProcesses = @(Get-Process -Name TGitCache -ErrorAction SilentlyContinue)
+    foreach ($process in $tgitCacheProcesses) {
+        try {
+            Stop-Process -Id $process.Id -Force -ErrorAction Stop
+            $records += New-CPanDiagnosticRecord -Type 'PerformanceHardening' -Severity 'Info' -Name 'TGitCache' -Id $process.Id -Message 'TortoiseGit cache helper was restarted once so the new cache settings can take effect.' -Detail $process.Path
+        } catch {
+            $records += New-CPanDiagnosticRecord -Type 'PerformanceHardening' -Severity 'Warning' -Name 'TGitCache' -Id $process.Id -Message 'TortoiseGit cache helper could not be restarted.' -Detail $_.Exception.Message
         }
     }
 
@@ -1748,8 +2148,8 @@ function Get-CPanDiagnostics {
     try {
         $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
         $gitProcesses = $processes | Where-Object {
-            ($_.Name -eq 'git.exe' -or $_.Name -eq 'git-remote-http.exe') -and
-            ($_.CommandLine -match 'fsmonitor--daemon|git fetch|git remote-http')
+            ($_.Name -eq 'git.exe' -or $_.Name -eq 'git-remote-http.exe' -or $_.Name -eq 'git-remote-https.exe') -and
+            ($_.CommandLine -match 'fsmonitor--daemon|git fetch|git remote-http|git remote-https|remote-http|remote-https')
         }
 
         foreach ($process in $gitProcesses) {
@@ -1759,6 +2159,21 @@ function Get-CPanDiagnostics {
                 Name = $process.Name
                 Id = $process.ProcessId
                 Message = 'Git background fetch/fsmonitor process found. Diagnose before stopping it.'
+                Detail = $process.CommandLine
+            }
+        }
+
+        $gitShellCacheProcesses = $processes | Where-Object {
+            $_.Name -eq 'TGitCache.exe'
+        }
+
+        foreach ($process in $gitShellCacheProcesses) {
+            $findings += [pscustomobject]@{
+                Type = 'GitShellCache'
+                Severity = 'Info'
+                Name = $process.Name
+                Id = $process.ProcessId
+                Message = 'TortoiseGit shell cache helper is running. If Explorer or desktop file clicks are slow, OptimizePerformance can restart this cache helper.'
                 Detail = $process.CommandLine
             }
         }
@@ -1830,7 +2245,7 @@ function Get-CPanDiagnostics {
             Severity = 'Info'
             Name = 'NoFindings'
             Id = $null
-            Message = 'No stale Git fsmonitor/fetch or Conda PowerShell helper processes were found.'
+            Message = 'No stale Git fsmonitor/fetch/network helper, TortoiseGit cache, or Conda PowerShell helper processes were found.'
             Detail = ''
         }
     }
@@ -1841,7 +2256,7 @@ function Get-CPanDiagnostics {
 function Invoke-CPanCleaner {
     [CmdletBinding()]
     param(
-        [ValidateSet('Scan', 'Clean', 'Diagnose', 'DisableWindowsUpdate', 'OptimizePerformance')]
+        [ValidateSet('Scan', 'Clean', 'Diagnose', 'DisableWindowsUpdate', 'OptimizePerformance', 'PreventPerformanceSpikes')]
         [string] $Action = 'Scan',
 
         [string[]] $Include = @('Default'),
@@ -1876,6 +2291,8 @@ function Invoke-CPanCleaner {
         $diagnostics = @(Invoke-CPanDisableWindowsUpdateDownloads -Context $context -Apply:$effectiveApply -IsAdmin $isAdmin)
     } elseif ($Action -eq 'OptimizePerformance') {
         $diagnostics = @(Invoke-CPanOptimizePerformance -Context $context -RepositoryPath $RepositoryPath -Apply:$effectiveApply)
+    } elseif ($Action -eq 'PreventPerformanceSpikes') {
+        $diagnostics = @(Invoke-CPanPreventPerformanceSpikes -Context $context -RepositoryPath $RepositoryPath -Apply:$effectiveApply -IsAdmin $isAdmin)
     } else {
         $targets = @(Get-CPanCleanerTarget -Include $Include)
         if ($Action -eq 'Scan') {
@@ -1909,7 +2326,7 @@ function Invoke-CPanCleaner {
     $summary = [pscustomobject]@{
         Version = $script:CleanerVersion
         Action = $Action
-        Mode = if (($Action -eq 'Clean' -or $Action -eq 'DisableWindowsUpdate' -or $Action -eq 'OptimizePerformance') -and $effectiveApply) { 'Apply' } elseif ($Action -eq 'Clean' -or $Action -eq 'DisableWindowsUpdate' -or $Action -eq 'OptimizePerformance') { 'DryRun' } else { 'ReadOnly' }
+        Mode = if (($Action -eq 'Clean' -or $Action -eq 'DisableWindowsUpdate' -or $Action -eq 'OptimizePerformance' -or $Action -eq 'PreventPerformanceSpikes') -and $effectiveApply) { 'Apply' } elseif ($Action -eq 'Clean' -or $Action -eq 'DisableWindowsUpdate' -or $Action -eq 'OptimizePerformance' -or $Action -eq 'PreventPerformanceSpikes') { 'DryRun' } else { 'ReadOnly' }
         IsAdministrator = $isAdmin
         Include = ($Include -join ',')
         MinimumAgeDays = $MinimumAgeDays

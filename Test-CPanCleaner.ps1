@@ -22,7 +22,9 @@ $requiredFiles = @(
     'Run-Scan.bat',
     'Run-Clean-Safe.bat',
     'Run-Clean-NetLimiter.bat',
-    'Run-Clean-Aggressive.bat'
+    'Run-Clean-Aggressive.bat',
+    'Run-Optimize-Performance.bat',
+    'Run-Prevent-Performance-Spikes.bat'
 )
 
 foreach ($file in $requiredFiles) {

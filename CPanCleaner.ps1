@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Scan', 'Clean', 'Diagnose', 'DisableWindowsUpdate', 'OptimizePerformance')]
+    [ValidateSet('Scan', 'Clean', 'Diagnose', 'DisableWindowsUpdate', 'OptimizePerformance', 'PreventPerformanceSpikes')]
     [string] $Action = 'Scan',
 
     [string[]] $Include = @('Default'),
@@ -108,4 +108,9 @@ if ($result.Action -eq 'DisableWindowsUpdate' -and $result.Mode -eq 'DryRun') {
 if ($result.Action -eq 'OptimizePerformance' -and $result.Mode -eq 'DryRun') {
     Write-Host ''
     Write-Host 'Dry-run complete. Re-run with -Apply to stop stale Git/Conda helpers, flush DNS, and lower noisy helper priorities.'
+}
+
+if ($result.Action -eq 'PreventPerformanceSpikes' -and $result.Mode -eq 'DryRun') {
+    Write-Host ''
+    Write-Host 'Dry-run complete. Re-run with -Apply -Elevate to set persistent Git/TortoiseGit performance settings and install the performance guard task.'
 }
