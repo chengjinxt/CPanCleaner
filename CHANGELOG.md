@@ -10,6 +10,8 @@
 - Expanded the performance priority guard to include observed mCloud/mount-space/upload-download/backup-disk and SpaceAgent sync helpers that can otherwise run at High or AboveNormal priority.
 - Expanded the performance priority guard to include Lenovo ImController, Synology USB helper, SmpHelp, AweSun, WXWorkWeb, and WeMail after observing them contributing to foreground lag.
 - Expanded the performance priority guard to lower Codex/WPS helpers and stop only Codex/OpenAI plugin Git probes that target `github.com/openai/plugins.git`.
+- Expanded the performance priority guard to include Microsoft PC Manager and Nutstore `NTFSWatcher` background helpers observed during CPU-saturation incidents.
+- Expanded the performance priority guard to include Synology Drive VSS, Nutstore driver, and VMware authorization background services.
 
 ## 0.5.0 - 2026-07-12
 

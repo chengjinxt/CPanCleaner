@@ -73,6 +73,11 @@ Assert-True -Condition ($moduleSource -match 'ApproxTotalCpuPercent -ge 5') -Mes
 Assert-True -Condition ($moduleSource -match "Type = 'GitShellCache'") -Message 'Diagnose should report TortoiseGit shell cache helper presence.'
 Assert-True -Condition ($moduleSource -match 'PreventPerformanceSpikes') -Message 'Persistent performance prevention action should be exposed.'
 Assert-True -Condition ($moduleSource -match 'TGitCacheCheckContentMaxSize') -Message 'Persistent performance prevention should configure TortoiseGit content hashing limit.'
+Assert-True -Condition ($moduleSource -match 'MSPCManagerService') -Message 'Performance guard should include Microsoft PC Manager background helper.'
+Assert-True -Condition ($moduleSource -match 'NTFSWatcher') -Message 'Performance guard should include Nutstore file watcher background helper.'
+Assert-True -Condition ($moduleSource -match 'NutstoreDriverSvc') -Message 'Performance guard should include Nutstore driver background helper.'
+Assert-True -Condition ($moduleSource -match 'vss-service-x64') -Message 'Performance guard should include Synology Drive VSS background helper.'
+Assert-True -Condition ($moduleSource -match 'vmware-authd') -Message 'Performance guard should include VMware authorization background helper.'
 
 $forbiddenFragments = @(
     '\Documents',
