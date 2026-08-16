@@ -1,144 +1,66 @@
 $ErrorActionPreference = 'Stop'
 
-$root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
-$modulePath = Join-Path $root 'src\CPanCleaner.psm1'
-Import-Module $modulePath -Force
+$root = Split-Path -Parent $PSScriptRoot
+$scriptPath = Join-Path $root 'CPanCleaner.ps1'
 
 function Assert-True {
-    param(
-        [bool] $Condition,
-        [string] $Message
-    )
-
-    if (-not $Condition) {
-        throw "Assertion failed: $Message"
-    }
+    param([bool] $Condition, [string] $Message)
+    if (-not $Condition) { throw "Assertion failed: $Message" }
 }
 
-function Assert-False {
-    param(
-        [bool] $Condition,
-        [string] $Message
-    )
+$tokens = $null
+$parseErrors = $null
+[System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref] $tokens, [ref] $parseErrors) | Out-Null
+Assert-True ($parseErrors.Count -eq 0) 'CPanCleaner.ps1 must parse without errors.'
 
-    Assert-True -Condition (-not $Condition) -Message $Message
-}
+$source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
+Assert-True ($source -match "ValidateSet\('Scan', 'Clean', 'OptimizePerformance', 'CloseWidgets'\)") 'Only the reviewed actions should be exposed.'
+Assert-True ($source -match '\$Apply -and -not \$DryRun') 'Real changes must require -Apply and respect -DryRun.'
+Assert-True ($source -match 'FileAttributes\]::ReparsePoint') 'Reparse points must be skipped.'
+Assert-True ($source -match 'codex-primary-runtime\.previous-\*') 'Only previous Codex runtimes may be selected.'
 
-$systemDrive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') } else { 'C:' }
-$defaultTargets = @(Get-CPanCleanerTarget -Include Default)
-$allTargets = @(Get-CPanCleanerTarget -Include All)
-
-Assert-True -Condition ($defaultTargets.Count -gt 0) -Message 'Default include should select at least one target.'
-Assert-False -Condition (@($defaultTargets | Where-Object { $_.Risk -eq 'High' }).Count -gt 0) -Message 'Default include must not select high-risk targets.'
-Assert-False -Condition (@($defaultTargets | Where-Object { $_.Category -eq 'RecycleBin' }).Count -gt 0) -Message 'Default include must not select recycle bin.'
-Assert-False -Condition (@($defaultTargets | Where-Object { $_.Category -eq 'NetLimiterStats' }).Count -gt 0) -Message 'Default include must not select NetLimiter statistics.'
-Assert-True -Condition (@($defaultTargets | Where-Object { $_.Category -eq 'DiagnosticsCache' }).Count -gt 0) -Message 'Default include should select low-risk diagnostics caches.'
-Assert-True -Condition (@($defaultTargets | Where-Object { $_.Category -eq 'InternetCache' }).Count -gt 0) -Message 'Default include should select current-user internet cache.'
-Assert-True -Condition (@($defaultTargets | Where-Object { $_.Category -eq 'CrashDumps' }).Count -gt 0) -Message 'Default include should select current-user crash dumps.'
-Assert-True -Condition (@($allTargets | Where-Object { $_.Category -eq 'WindowsUpdate' }).Count -gt 0) -Message 'All include should expose Windows Update targets.'
-Assert-True -Condition (@($allTargets | Where-Object { $_.Category -eq 'RecycleBin' }).Count -eq 1) -Message 'All include should expose recycle bin target.'
-Assert-True -Condition (@($allTargets | Where-Object { $_.Category -eq 'NetLimiterStats' }).Count -eq 1) -Message 'All include should expose NetLimiter statistics target.'
-Assert-False -Condition (@($allTargets | Where-Object { $_.Category -eq 'VisualStudioPackageCache' }).Count -gt 0) -Message 'All include must not expose Visual Studio package cache target.'
-
-$visualStudioPackageCacheProtected = $false
-try {
-    [void] (Get-CPanCleanerTarget -Include VisualStudioPackageCache)
-} catch {
-    $visualStudioPackageCacheProtected = ($_.Exception.Message -like '*Protected Include value(s): VisualStudioPackageCache*')
-}
-Assert-True -Condition $visualStudioPackageCacheProtected -Message 'Visual Studio package cache include should be protected.'
-
-$windowsUpdateDisablePreview = Invoke-CPanCleaner -Action DisableWindowsUpdate -DryRun -Quiet
-Assert-True -Condition ($windowsUpdateDisablePreview.Mode -eq 'DryRun') -Message 'DisableWindowsUpdate should default to dry-run mode without -Apply.'
-Assert-True -Condition ($windowsUpdateDisablePreview.Items.Count -eq 0) -Message 'DisableWindowsUpdate should not produce file cleanup items.'
-Assert-True -Condition (@($windowsUpdateDisablePreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' }).Count -gt 0) -Message 'DisableWindowsUpdate dry-run should report planned changes.'
-
-$performanceOptimizePreview = Invoke-CPanCleaner -Action OptimizePerformance -DryRun -Quiet
-Assert-True -Condition ($performanceOptimizePreview.Mode -eq 'DryRun') -Message 'OptimizePerformance should default to dry-run mode without -Apply.'
-Assert-True -Condition ($performanceOptimizePreview.Items.Count -eq 0) -Message 'OptimizePerformance should not produce file cleanup items.'
-Assert-True -Condition (@($performanceOptimizePreview.Diagnostics | Where-Object { $_.Type -eq 'PerformanceCpu' -or $_.Type -eq 'PlannedChange' -or $_.Type -eq 'PerformanceOptimization' }).Count -gt 0) -Message 'OptimizePerformance dry-run should report performance diagnostics or planned changes.'
-
-$performancePreventPreview = Invoke-CPanCleaner -Action PreventPerformanceSpikes -DryRun -Quiet
-Assert-True -Condition ($performancePreventPreview.Mode -eq 'DryRun') -Message 'PreventPerformanceSpikes should default to dry-run mode without -Apply.'
-Assert-True -Condition ($performancePreventPreview.Items.Count -eq 0) -Message 'PreventPerformanceSpikes should not produce file cleanup items.'
-Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq '\CPanCleaner\PerformanceGuard' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan the performance guard task.'
-Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq 'TGitCacheCheckContentMaxSize' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan TortoiseGit content hashing reduction.'
-Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq 'core.fsmonitor' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan global Git fsmonitor hardening.'
-
-$moduleSource = Get-Content -LiteralPath $modulePath -Raw -Encoding UTF8
-Assert-True -Condition ($moduleSource -match 'git-remote-https\.exe') -Message 'Performance optimization should recognize git-remote-https.exe helpers.'
-Assert-True -Condition ($moduleSource -match 'git remote-https') -Message 'Performance optimization should match Git remote HTTPS command lines.'
-Assert-True -Condition ($moduleSource -match 'remote-https') -Message 'Performance optimization should match remote-https helper command lines.'
-Assert-True -Condition ($moduleSource -match 'ApproxTotalCpuPercent -ge 5') -Message 'Performance optimization should handle hot TGitCache shell-cache CPU loops.'
-Assert-True -Condition ($moduleSource -match "Type = 'GitShellCache'") -Message 'Diagnose should report TortoiseGit shell cache helper presence.'
-Assert-True -Condition ($moduleSource -match 'PreventPerformanceSpikes') -Message 'Persistent performance prevention action should be exposed.'
-Assert-True -Condition ($moduleSource -match 'TGitCacheCheckContentMaxSize') -Message 'Persistent performance prevention should configure TortoiseGit content hashing limit.'
-Assert-True -Condition ($moduleSource -match 'MSPCManagerService') -Message 'Performance guard should include Microsoft PC Manager background helper.'
-Assert-True -Condition ($moduleSource -match 'NTFSWatcher') -Message 'Performance guard should include Nutstore file watcher background helper.'
-Assert-True -Condition ($moduleSource -match 'NutstoreDriverSvc') -Message 'Performance guard should include Nutstore driver background helper.'
-Assert-True -Condition ($moduleSource -match 'vss-service-x64') -Message 'Performance guard should include Synology Drive VSS background helper.'
-Assert-True -Condition ($moduleSource -match 'vmware-authd') -Message 'Performance guard should include VMware authorization background helper.'
-
-$forbiddenFragments = @(
-    '\Documents',
-    '\Downloads',
-    '\Desktop',
-    '\Pictures',
-    '\Music',
-    '\Videos',
-    '\Windows\WinSxS',
-    '\Windows\servicing\Packages',
-    '\Program Files'
+$forbidden = @(
+    'DisableWindowsUpdate',
+    'PreventPerformanceSpikes',
+    'Clear-RecycleBin',
+    'SoftwareDistribution',
+    'DeliveryOptimization',
+    'NetLimiterStats',
+    'VisualStudioPackageCache',
+    'schtasks.exe',
+    'Stop-Service',
+    'Set-ItemProperty'
 )
-
-foreach ($target in $allTargets) {
-    foreach ($fragment in $forbiddenFragments) {
-        Assert-False -Condition ($target.Path -like "*$fragment*") -Message "Target $($target.Id) points into forbidden fragment $fragment."
-    }
+foreach ($fragment in $forbidden) {
+    Assert-True (-not $source.Contains($fragment)) "Forbidden behavior remains in the executable: $fragment"
 }
 
-Assert-True `
-    -Condition (Test-CPanPathSafety -Path "$systemDrive\Windows\Temp\cpancleaner-test.tmp" -AllowedRoot "$systemDrive\Windows\Temp") `
-    -Message 'Windows temp child should be allowed under its own root.'
-
-Assert-False `
-    -Condition (Test-CPanPathSafety -Path "$systemDrive\Windows\Temp" -AllowedRoot "$systemDrive\Windows\Temp") `
-    -Message 'Cleaner should not delete a target root unless explicitly allowed.'
-
-Assert-False `
-    -Condition (Test-CPanPathSafety -Path "$systemDrive\Windows\WinSxS\manifest.tmp" -AllowedRoot "$systemDrive\Windows") `
-    -Message 'WinSxS children must be blocked.'
-
-Assert-False `
-    -Condition (Test-CPanPathSafety -Path "$systemDrive\Windows\servicing\Packages\package.tmp" -AllowedRoot "$systemDrive\Windows") `
-    -Message 'Windows servicing package children must be blocked.'
-
-if ($env:TEMP) {
-    Assert-True `
-        -Condition (Test-CPanPathSafety -Path (Join-Path $env:TEMP 'cpancleaner-test.tmp') -AllowedRoot $env:TEMP) `
-        -Message 'Current user temp child should be allowed under temp root.'
+$obsoleteFiles = @(
+    'src\CPanCleaner.psm1',
+    'scripts\Close-WindowsWidgets.ps1',
+    'Run-Scan.bat',
+    'Run-Clean-Safe.bat',
+    'Run-Clean-Aggressive.bat',
+    'Run-Clean-NetLimiter.bat',
+    'Run-Disable-WindowsUpdate.bat',
+    'Run-Optimize-Performance.bat',
+    'Run-Prevent-Performance-Spikes.bat',
+    'Run-Close-WindowsWidgets.bat'
+)
+foreach ($relativePath in $obsoleteFiles) {
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $root $relativePath))) "Obsolete executable still exists: $relativePath"
 }
 
-Assert-True `
-    -Condition (Test-CPanPathSafety -Path "$systemDrive\ProgramData\Locktime\NetLimiter\5\Stats\nlstats.db" -AllowedRoot "$systemDrive\ProgramData\Locktime\NetLimiter\5\Stats\nlstats.db" -AllowRootItself) `
-    -Message 'NetLimiter statistics database file should be allowed only as an explicit file target.'
+$json = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Action Scan -MaxScanItems 1000 -LogDirectory (Join-Path $root 'logs') -Json
+$result = $json | ConvertFrom-Json
+Assert-True ($result.Version -eq '1.0.0') 'Scan should report version 1.0.0.'
+Assert-True ($result.Action -eq 'Scan') 'Scan should report the requested action.'
+Assert-True ($result.Mode -eq 'ReadOnly') 'Scan must be read-only.'
+Assert-True (@($result.Items | Where-Object { $_.Id -like 'PackageTempState:*' }).Count -eq 0) 'UWP TempState targets should not be included.'
 
-Assert-True `
-    -Condition (Test-CPanPathSafety -Path "$systemDrive\ProgramData\Microsoft\Windows\WER\cpancleaner-test.tmp" -AllowedRoot "$systemDrive\ProgramData\Microsoft\Windows\WER") `
-    -Message 'WER cache children should be allowed under their explicit cache root.'
+$previewJson = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Action CloseWidgets -Json
+$preview = $previewJson | ConvertFrom-Json
+Assert-True ($preview.Mode -eq 'DryRun') 'CloseWidgets must default to dry-run.'
+Assert-True (@($preview.Diagnostics | Where-Object { $_.Status -eq 'Closed' }).Count -eq 0) 'CloseWidgets preview must not stop processes.'
 
-Assert-True `
-    -Condition (Test-CPanPathSafety -Path "$systemDrive\ProgramData\Dbg\sym\cpancleaner-test.tmp" -AllowedRoot "$systemDrive\ProgramData\Dbg\sym") `
-    -Message 'Debug symbol cache children should be allowed under their explicit cache root.'
-
-if ($env:LOCALAPPDATA) {
-    Assert-True `
-        -Condition (Test-CPanPathSafety -Path (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\INetCache\cpancleaner-test.tmp') -AllowedRoot (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\INetCache')) `
-        -Message 'Current-user INetCache children should be allowed under their explicit cache root.'
-
-    Assert-True `
-        -Condition (Test-CPanPathSafety -Path (Join-Path $env:LOCALAPPDATA 'CrashDumps\cpancleaner-test.dmp') -AllowedRoot (Join-Path $env:LOCALAPPDATA 'CrashDumps')) `
-        -Message 'Current-user crash dump children should be allowed under their explicit cache root.'
-}
-
-Write-Host 'All CPanCleaner static safety tests passed.'
+Write-Output 'All CPanCleaner safety tests passed.'
