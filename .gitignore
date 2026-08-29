@@ -8,3 +8,8 @@ CPanCleaner-*.csv
 *.tmp
 *.bak
 .DS_Store
+**/bin/
+**/obj/
+.vs/
+artifacts/
+dist/

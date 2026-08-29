@@ -2,49 +2,99 @@
 
 ## 执行模型
 
-- `Scan` 只读取目录和磁盘空间。
-- `Clean` 默认是 dry-run；只有同时提供 `-Apply` 才删除候选项。
-- `OptimizePerformance` 默认预览；`-Apply` 只刷新 DNS，并把明确列出的后台辅助进程优先级临时设为 `BelowNormal`。
-- `CloseWidgets` 默认预览；`-Apply` 只结束当前 `Widgets` 和 `WidgetService` 进程。
-- `-Elevate` 只负责通过 UAC 重新启动同一脚本，不绕过 Windows 权限。
+CPanCleaner 2.0 的 GUI 和命令行后端共用同一套规则：
 
-## 允许清理的目标
+1. 扫描和 dry-run 不删除文件、不写策略。
+2. 真实变更必须显式进入 apply。
+3. 中高风险功能必须单独选择；高风险功能还必须输入“执行”。
+4. 需要系统权限时由 GUI 触发 UAC，不要求整个应用始终以管理员身份运行。
+5. 每次 PowerShell 操作都记录日志；管理员子进程完成后应再次预览核对状态。
 
-- 当前用户临时目录。
-- `C:\Windows\Temp`。
-- Windows Error Reporting 缓存。
-- 下载的调试符号缓存。
-- Windows minidump。
-- 当前用户 INetCache、CrashDumps 和 D3D shader cache。
-- Edge/Chrome 的 `Cache` 与 `Code Cache`，不包含用户资料数据。
-- NVIDIA/AMD shader cache。
+## 风险分层
+
+### 低风险
+
+`Default` 只包含可重建的缓存、临时数据或只读诊断：
+
+- 当前用户和 Windows Temp。
+- Windows Error Reporting、调试符号与崩溃转储。
+- INetCache、Edge/Chrome Cache 与 Code Cache。
+- Direct3D、NVIDIA、AMD shader cache。
 - 远程桌面 bitmap cache。
-- 名称匹配 `codex-primary-runtime.previous-*` 的旧 Codex 运行时备份；当前运行时不处理。
+- 仅匹配 `codex-primary-runtime.previous-*` 的旧 Codex runtime。
+- Git/Conda/TortoiseGit 只读诊断。
+- 仅结束当前 Widgets 进程。
 
-## 删除保护
+部分低风险系统目录仍需要管理员权限。非管理员状态下后端报告 `NeedsAdministrator`，不会绕过权限。
 
-每个候选必须是其固定允许根目录的子项；脚本拒绝删除目标根目录本身。以下位置另外受到显式保护：
+### 中等风险
 
-- `C:\`、`C:\Windows`、System32、SysWOW64、WinSxS 和 servicing。
-- `Program Files` 与 `Program Files (x86)`。
-- 用户配置文件根目录及桌面、文档、下载、图片、音乐、视频。
+中等风险功能可能中断后台工作、导致重新下载或写入当前用户设置：
 
-重解析点不会进入删除候选。使用年龄过滤的目录必须保证自身及全部可枚举后代均早于截止时间；无法完整枚举的目录会跳过。
+- Windows Update 下载和升级暂存缓存。
+- Delivery Optimization 缓存。
+- 历史 CPanCleaner 隔离目录。
+- 一次性性能优化。
+- 当前用户 Widgets 隐藏设置。
 
-## 明确排除
+Windows Update 缓存只处理 `SoftwareDistribution\Download`、升级暂存和明确的 Delivery Optimization Cache。它不删除 `SoftwareDistribution\DataStore`、BITS 队列数据库、WinSxS、servicing 元数据或更新日志。
 
-为避免丢失历史、安装修复能力或系统状态，当前版本不提供以下功能：
+### 高风险
+
+高风险功能会永久丢失可恢复数据或持久改变系统行为：
 
 - 清空回收站。
-- 删除 Windows Update 或 Delivery Optimization 内容。
-- 删除 Visual Studio 安装包缓存。
-- 删除 NetLimiter 统计数据库。
-- 禁用 Windows Update 服务、策略或计划任务。
-- 创建性能守护计划任务、修改 Git 全局设置或持久调整进程策略。
-- 删除 Codex 当前运行时、会话数据库、日志或其他用户数据。
+- 删除 NetLimiter `nlstats.db` 历史流量数据库。
+- 删除 Visual Studio Installer Packages 子项。
+- 历史激进组合清理。
+- 禁用 Windows Update 自动下载。
+- 写入 Git/TortoiseGit 持久设置；PerformanceGuard 由独立界面功能按用户设置的周期管理。
+- 写入机器级 Widgets 策略。
 
-## 失败处理
+高风险功能不属于 `Default`。`VisualStudioPackageCache` 也不属于 `All`，只能通过完全匹配的 Include 选择；历史激进组合同样不包含它和回收站。
 
-占用、拒绝访问或其他单项错误会记录到结果和日志，随后继续处理其他目标。日志写入失败会自动停用本次日志，不会让清理任务整体终止。
+## 文件删除保护
 
-空间统计以 C 盘执行前后的可用空间为准；按文件估算的 `RemovedMB` 可能受文件占用、压缩、稀疏文件和扫描上限影响。
+每个目标都包含固定路径、允许根、目标种类和风险元数据。删除前执行以下检查：
+
+- 目录型缓存只删除候选子项，不删除父目录。
+- `DirectorySelf` / `FileSelf` 只用于动态隔离目录和精确单文件目标。
+- 重解析点不进入候选或递归测量。
+- 带年龄过滤的目录若包含近期后代，或无法完整枚举后代，则整体跳过。
+- 明确阻止 C 盘根、Windows 根、System32、SysWOW64、WinSxS、servicing、Program Files、Defender 数据。
+- 明确阻止用户 Profile 根以及 Desktop、Documents、Downloads、Pictures、Music、Videos。
+- 单项占用或访问失败只记录该项，不扩大删除范围。
+
+## 特殊高风险目标
+
+### NetLimiter
+
+只允许删除 `C:\ProgramData\Locktime\NetLimiter\5\Stats\nlstats.db`。执行时先记录 `NLSvc` 状态；如果运行中的服务无法停止，拒绝删除；完成后按原状态恢复。该动作会丢失历史流量统计，不会卸载 NetLimiter 或删除规则、驱动、许可证。
+
+### Visual Studio Packages
+
+允许根为 `C:\ProgramData\Microsoft\VisualStudio\Packages`。该目录可能同时承载包缓存和安装器状态。删除可能导致 C++ 工作负载识别异常，并影响修复、修改、更新、卸载或离线安装。界面明确建议只扫描。执行删除前应准备完整备份，并接受重新下载或重装后果。
+
+### 禁用 Windows Update
+
+该动作同时处理策略、`wuauserv`、`UsoSvc`、`DoSvc`、`WaaSMedicSvc`、BITS 作业及 WindowsUpdate/UpdateOrchestrator/WaaSMedic 任务，但不再自动安装 `\CPanCleaner\WindowsUpdateGuard`。
+
+它可能阻止安全更新、Defender 情报、驱动和功能更新。当前 GUI 没有“一键恢复 Windows Update 默认状态”，因此只有能够手工恢复策略、服务和计划任务的用户才应执行。缓存删除与禁用自动下载是两个独立动作。
+
+### 性能防复发
+
+`PreventPerformanceSpikes` 只写入 Git/TortoiseGit 持久设置。`\CPanCleaner\PerformanceGuard` 和 `\CPanCleaner\WindowsUpdateGuard` 在界面中独立展示，只有用户明确开启后才注册；周期限制为 5–1440 分钟，默认 15 分钟。关闭只移除守护任务（PerformanceGuard 同时移除专用脚本），不自动回滚其他策略。
+
+### Win+R 命令历史修复
+
+`RepairRunHistory` 默认只读检查当前用户的 `Start_TrackProgs`、`RunMRU`、Explorer 历史策略和 ACL。`-Apply` 会先生成 `.run-history-backup.json`，再启用 `Start_TrackProgs`、移除当前用户中非零的历史阻断策略、确保 `RunMRU` 可写并通知 Explorer。它不会开启 `Start_TrackDocs`、不会清空已有命令、不会结束 Explorer，也不会自动修改机器级策略。启用后 Windows 会保存程序启动和 Win+R 命令历史，属于明确的隐私取舍。
+
+## GUI 安全边界
+
+- 功能目录只决定界面展示和传给后端的固定参数，不执行任意命令文本。
+- C# 使用 `ProcessStartInfo.ArgumentList` 传参，避免拼接用户输入形成 PowerShell 命令。
+- 可变输入目前只有 0–3650 的保留天数。
+- 普通执行直接捕获 JSON；管理员执行使用 UAC 隔离进程，通过一次性随机文件名 JSON 回传结果并在读取后删除。
+- 取消只能终止仍在运行的进程，已经完成的系统操作不会自动回滚。
+
+高风险功能的原理、影响与路径来源位于 [features.json](../src/CPanCleaner.Gui/Resources/features.json)，架构说明见 [GUI_ARCHITECTURE.md](./GUI_ARCHITECTURE.md)。

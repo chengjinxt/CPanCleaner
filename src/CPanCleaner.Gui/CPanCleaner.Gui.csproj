@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net7.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>CPanCleaner</AssemblyName>
+    <RootNamespace>CPanCleaner.Gui</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>2.2.1</Version>
+    <AssemblyVersion>2.2.1.0</AssemblyVersion>
+    <FileVersion>2.2.1.0</FileVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Update="Resources\features.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\CPanCleaner.ps1" Link="backend\CPanCleaner.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\CPanCleaner.psm1" Link="backend\src\CPanCleaner.psm1" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\scripts\Close-WindowsWidgets.ps1" Link="backend\scripts\Close-WindowsWidgets.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\README.md" Link="README.md" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\docs\SAFETY.md" Link="docs\SAFETY.md" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\docs\RELEASE.md" Link="docs\RELEASE.md" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

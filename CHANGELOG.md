@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.2.1 - 2026-08-29
+
+- Fixed `RepairRunHistory` failing with `UnauthorizedAccessException` by avoiding `New-Item -Force` on an existing Explorer `Advanced` registry key.
+- Added stage names to Run-history repair failures for actionable diagnostics.
+- Forced PowerShell console and log output to UTF-8, and changed the GUI to parse every successful operation from a UTF-8 JSON result file instead of localized console output.
+
+## 2.2.0 - 2026-08-29
+
+- Added a GUI-visible `RepairRunHistory` feature for diagnosing and repairing Win+R commands that are not retained.
+- The repair identifies disabled `Start_TrackProgs`, missing or unwritable `RunMRU`, and current-user or machine-level Explorer policy blockers.
+- Apply mode backs up the original state, changes only current-user launch tracking and blocking user policies, preserves existing command entries, avoids enabling `Start_TrackDocs`, and notifies Explorer without terminating it.
+
+## 2.1.0 - 2026-08-22
+
+- Added GUI-visible management for `PerformanceGuard` and `WindowsUpdateGuard`, including status, enable/update, disable, and a configurable 5–1440 minute interval.
+- Decoupled guard installation from `PreventPerformanceSpikes` and `DisableWindowsUpdate`; tasks are created only after explicit user enablement.
+- Changed the default guard interval to 15 minutes and avoided idle WMI/CIM queries in `PerformanceGuard` when no Git process exists.
+- Added a self-contained `win-x64` publish workflow targeting `dist` for folder-based transfer to other Windows computers.
+
+## 2.0.0 - 2026-08-18
+
+- Added a C# WPF desktop application with separate low-, medium-, and high-risk tabs and grouped features.
+- Added a JSON-driven feature catalog with dynamic implementation principles, impact notes, affected paths, safeguards, permissions, and Git history provenance.
+- Restored the modular PowerShell backend and the functionality previously exposed through the eight deleted batch entrypoints.
+- Restored Windows Update control, NetLimiter cleanup, persistent performance prevention, historical aggressive cleanup, and Widgets user/machine policy flows behind dry-run and explicit confirmations.
+- Restored Visual Studio package-cache scanning and explicit cleanup only on the high-risk page; excluded it from `Default`, `All`, and the aggressive combination.
+- Merged browser, graphics, minidump, remote-desktop, and previous Codex runtime cache targets from the 1.0.0 single-file release.
+- Added UAC orchestration, asynchronous execution, cancellation, structured JSON result display, typed high-risk confirmation, and GUI smoke validation.
+- Strengthened age-filter handling and reparse-point rejection in the restored module.
+
 ## 1.0.0 - 2026-08-17
 
 - Consolidated every end-user operation into the single self-contained `CPanCleaner.ps1` release file.
