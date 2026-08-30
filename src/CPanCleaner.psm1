@@ -1,6 +1,6 @@
 Set-StrictMode -Version 2.0
 
-$script:CleanerVersion = '2.2.1'
+$script:CleanerVersion = '2.3.0'
 
 function Get-CPanSystemDrive {
     $drive = $env:SystemDrive

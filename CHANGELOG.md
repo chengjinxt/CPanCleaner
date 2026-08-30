@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.0 - 2026-08-30
+
+- Added an execution-result context menu for opening the selected item's filesystem location.
+- Right-click now selects the row under the pointer before opening the menu.
+- Directory results open directly; file results open Explorer with the exact file selected.
+- The menu accepts only existing, fully qualified local filesystem paths and remains disabled for registry, task, and diagnostic-detail rows.
+
 ## 2.2.1 - 2026-08-29
 
 - Fixed `RepairRunHistory` failing with `UnauthorizedAccessException` by avoiding `New-Item -Force` on an existing Explorer `Advanced` registry key.

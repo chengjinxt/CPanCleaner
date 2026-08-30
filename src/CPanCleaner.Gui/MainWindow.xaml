@@ -232,9 +232,17 @@
                                 <TextBlock Text="{Binding StatusText}" FontSize="11" Foreground="#667085" Margin="0,2,0,0" />
                             </StackPanel>
                         </DockPanel>
-                        <DataGrid Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="True"
+                        <DataGrid x:Name="ResultGrid" Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="True"
                                   CanUserAddRows="False" HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                                  BorderThickness="0" RowHeaderWidth="0" Background="White">
+                                  BorderThickness="0" RowHeaderWidth="0" Background="White"
+                                  PreviewMouseRightButtonDown="ResultGrid_OnPreviewMouseRightButtonDown">
+                            <DataGrid.ContextMenu>
+                                <ContextMenu Opened="ResultContextMenu_OnOpened">
+                                    <MenuItem x:Name="OpenResultLocationMenuItem"
+                                              Header="打开选中条目所在文件夹"
+                                              Click="OpenResultLocationMenuItem_OnClick" />
+                                </ContextMenu>
+                            </DataGrid.ContextMenu>
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="类型" Binding="{Binding Type}" Width="90" />
                                 <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="170" />

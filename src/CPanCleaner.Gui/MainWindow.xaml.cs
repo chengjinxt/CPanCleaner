@@ -7,6 +7,8 @@ using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Input;
+using System.Windows.Media;
 using CPanCleaner.Gui.Models;
 using CPanCleaner.Gui.Services;
 
@@ -322,6 +324,118 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             ArgumentList = { _backend.LogsDirectory },
             UseShellExecute = true
         });
+    }
+
+    private void ResultGrid_OnPreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        var current = e.OriginalSource as DependencyObject;
+        while (current is not null && current is not DataGridRow)
+        {
+            current = GetParentObject(current);
+        }
+
+        if (current is DataGridRow row)
+        {
+            ResultGrid.SelectedItem = row.Item;
+            row.Focus();
+        }
+        else
+        {
+            ResultGrid.SelectedItem = null;
+        }
+    }
+
+    private void ResultContextMenu_OnOpened(object sender, RoutedEventArgs e)
+    {
+        var canOpen = TryResolveResultLocation(ResultGrid.SelectedItem as OperationItem, out _, out _);
+        OpenResultLocationMenuItem.IsEnabled = canOpen;
+        OpenResultLocationMenuItem.ToolTip = canOpen
+            ? null
+            : "所选结果不是当前存在的本地文件或文件夹。";
+    }
+
+    private void OpenResultLocationMenuItem_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (!TryResolveResultLocation(ResultGrid.SelectedItem as OperationItem, out var location, out var isFile))
+        {
+            MessageBox.Show(this, "所选结果没有可打开的本地文件位置。", "无法打开位置", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                UseShellExecute = true
+            };
+            if (isFile)
+            {
+                startInfo.ArgumentList.Add("/select,");
+            }
+            startInfo.ArgumentList.Add(location);
+            Process.Start(startInfo);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(this, $"无法打开所在文件夹：{exception.Message}", "打开失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private static bool TryResolveResultLocation(OperationItem? item, out string location, out bool isFile)
+    {
+        location = string.Empty;
+        isFile = false;
+        if (item is null || string.IsNullOrWhiteSpace(item.Path))
+        {
+            return false;
+        }
+
+        try
+        {
+            var candidate = Environment.ExpandEnvironmentVariables(item.Path.Trim().Trim('"'));
+            if (!Path.IsPathFullyQualified(candidate))
+            {
+                return false;
+            }
+
+            var fullPath = Path.GetFullPath(candidate);
+            if (Directory.Exists(fullPath))
+            {
+                location = fullPath;
+                return true;
+            }
+            if (File.Exists(fullPath))
+            {
+                location = fullPath;
+                isFile = true;
+                return true;
+            }
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException or IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    private static DependencyObject? GetParentObject(DependencyObject child)
+    {
+        if (child is ContentElement contentElement)
+        {
+            var contentParent = ContentOperations.GetParent(contentElement);
+            if (contentParent is not null)
+            {
+                return contentParent;
+            }
+            if (contentElement is FrameworkContentElement frameworkContentElement)
+            {
+                return frameworkContentElement.Parent;
+            }
+        }
+
+        return VisualTreeHelper.GetParent(child);
     }
 
     private void RefreshDriveStatus()

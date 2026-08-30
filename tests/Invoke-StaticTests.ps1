@@ -63,7 +63,7 @@ Assert-True -Condition ($performancePreventPreview.Items.Count -eq 0) -Message '
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'GuardControl' -and $_.Name -eq '\CPanCleaner\PerformanceGuard' }).Count -eq 1) -Message 'PreventPerformanceSpikes should explain that PerformanceGuard is managed separately.'
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq 'TGitCacheCheckContentMaxSize' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan TortoiseGit content hashing reduction.'
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq 'core.fsmonitor' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan global Git fsmonitor hardening.'
-Assert-True -Condition ($performancePreventPreview.Version -eq '2.2.1') -Message 'Run-history repair backend should report version 2.2.1.'
+Assert-True -Condition ($performancePreventPreview.Version -eq '2.3.0') -Message 'Result-location context menu release should report version 2.3.0.'
 
 $guardStatus = Invoke-CPanCleaner -Action ManageGuard -GuardName PerformanceGuard -GuardOperation Status -Quiet
 Assert-True -Condition ($guardStatus.Mode -eq 'ReadOnly') -Message 'Guard status must be read-only.'
@@ -127,6 +127,15 @@ Assert-True -Condition ($moduleSource -match 'Add-Content.+-Encoding UTF8') -Mes
 $backendSource = Get-Content -LiteralPath (Join-Path $root 'src\CPanCleaner.Gui\Services\CleanerBackend.cs') -Raw -Encoding UTF8
 Assert-True -Condition ($backendSource -match 'operation-results') -Message 'GUI operations should use a UTF-8 JSON result backchannel.'
 Assert-True -Condition ($backendSource -match 'File\.ReadAllTextAsync\(resultPath') -Message 'GUI should parse the JSON result file instead of localized console output.'
+
+$mainWindowXaml = Get-Content -LiteralPath (Join-Path $root 'src\CPanCleaner.Gui\MainWindow.xaml') -Raw -Encoding UTF8
+$mainWindowSource = Get-Content -LiteralPath (Join-Path $root 'src\CPanCleaner.Gui\MainWindow.xaml.cs') -Raw -Encoding UTF8
+Assert-True -Condition ($mainWindowXaml -match 'x:Name="OpenResultLocationMenuItem"') -Message 'Result grid should expose an open-location context menu.'
+Assert-True -Condition ($mainWindowXaml -match 'PreviewMouseRightButtonDown="ResultGrid_OnPreviewMouseRightButtonDown"') -Message 'Right-click should select the row under the pointer.'
+Assert-True -Condition ($mainWindowSource -match 'Path\.IsPathFullyQualified') -Message 'Open-location should require a fully-qualified filesystem path.'
+Assert-True -Condition ($mainWindowSource -match 'Directory\.Exists\(fullPath\)') -Message 'Open-location should verify directories exist.'
+Assert-True -Condition ($mainWindowSource -match 'File\.Exists\(fullPath\)') -Message 'Open-location should verify files exist.'
+Assert-True -Condition ($mainWindowSource -match 'ArgumentList\.Add\("/select,"\)') -Message 'Open-location should select an exact file when the result points to a file.'
 
 $forbiddenFragments = @(
     '\Documents',
