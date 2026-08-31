@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $modulePath = Join-Path $root 'src\CPanCleaner.psm1'
@@ -63,7 +63,7 @@ Assert-True -Condition ($performancePreventPreview.Items.Count -eq 0) -Message '
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'GuardControl' -and $_.Name -eq '\CPanCleaner\PerformanceGuard' }).Count -eq 1) -Message 'PreventPerformanceSpikes should explain that PerformanceGuard is managed separately.'
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq 'TGitCacheCheckContentMaxSize' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan TortoiseGit content hashing reduction.'
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq 'core.fsmonitor' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan global Git fsmonitor hardening.'
-Assert-True -Condition ($performancePreventPreview.Version -eq '2.3.0') -Message 'Result-location context menu release should report version 2.3.0.'
+Assert-True -Condition ($performancePreventPreview.Version -eq '2.4.0') -Message 'Storage-analysis release should report version 2.4.0.'
 
 $guardStatus = Invoke-CPanCleaner -Action ManageGuard -GuardName PerformanceGuard -GuardOperation Status -Quiet
 Assert-True -Condition ($guardStatus.Mode -eq 'ReadOnly') -Message 'Guard status must be read-only.'
@@ -88,7 +88,7 @@ Assert-True -Condition ($featureCatalog.Count -gt 0) -Message 'GUI feature catal
 foreach ($risk in @('Low', 'Medium', 'High')) {
     Assert-True -Condition (@($featureCatalog | Where-Object { $_.risk -eq $risk }).Count -gt 0) -Message "GUI should expose a $risk risk tab."
 }
-foreach ($id in @('aggressive-history', 'netlimiter-stats', 'disable-windows-update', 'optimize-performance', 'prevent-performance-spikes', 'performance-guard-task', 'windows-update-guard-task', 'repair-run-history', 'close-widgets', 'visual-studio-packages')) {
+foreach ($id in @('aggressive-history', 'netlimiter-stats', 'disable-windows-update', 'optimize-performance', 'prevent-performance-spikes', 'performance-guard-task', 'windows-update-guard-task', 'repair-run-history', 'close-widgets', 'visual-studio-packages', 'storage-analysis', 'browser-offline-cache', 'qoder-cache', 'nuget-cache', 'nuget-migrate', 'nuget-remove-source', 'nuget-rollback', 'downloads-review', 'docker-migration-guide', 'wsl-migration-guide', 'visual-studio-migration-guide')) {
     Assert-True -Condition (@($featureCatalog | Where-Object { $_.id -eq $id }).Count -eq 1) -Message "GUI should expose restored historical feature $id exactly once."
 }
 foreach ($feature in $featureCatalog) {
@@ -127,6 +127,8 @@ Assert-True -Condition ($moduleSource -match 'Add-Content.+-Encoding UTF8') -Mes
 $backendSource = Get-Content -LiteralPath (Join-Path $root 'src\CPanCleaner.Gui\Services\CleanerBackend.cs') -Raw -Encoding UTF8
 Assert-True -Condition ($backendSource -match 'operation-results') -Message 'GUI operations should use a UTF-8 JSON result backchannel.'
 Assert-True -Condition ($backendSource -match 'File\.ReadAllTextAsync\(resultPath') -Message 'GUI should parse the JSON result file instead of localized console output.'
+Assert-True -Condition ($backendSource -match 'ProcessPriorityClass\.BelowNormal') -Message 'GUI backend scans should run at BelowNormal priority.'
+Assert-True -Condition ($backendSource -match 'SelectedItemTokens') -Message 'GUI should pass only explicitly selected Downloads identity tokens.'
 
 $mainWindowXaml = Get-Content -LiteralPath (Join-Path $root 'src\CPanCleaner.Gui\MainWindow.xaml') -Raw -Encoding UTF8
 $mainWindowSource = Get-Content -LiteralPath (Join-Path $root 'src\CPanCleaner.Gui\MainWindow.xaml.cs') -Raw -Encoding UTF8
@@ -136,6 +138,91 @@ Assert-True -Condition ($mainWindowSource -match 'Path\.IsPathFullyQualified') -
 Assert-True -Condition ($mainWindowSource -match 'Directory\.Exists\(fullPath\)') -Message 'Open-location should verify directories exist.'
 Assert-True -Condition ($mainWindowSource -match 'File\.Exists\(fullPath\)') -Message 'Open-location should verify files exist.'
 Assert-True -Condition ($mainWindowSource -match 'ArgumentList\.Add\("/select,"\)') -Message 'Open-location should select an exact file when the result points to a file.'
+Assert-True -Condition ($mainWindowXaml -match 'DataGridCheckBoxColumn Header="选择"') -Message 'Downloads review should expose per-file selection checkboxes.'
+
+$browserTargets = @(Get-CPanCleanerTarget -Include BrowserCache)
+foreach ($target in $browserTargets) {
+    Assert-True -Condition ((Split-Path -Leaf $target.Path) -in @('Cache','Code Cache','GPUCache','DawnGraphiteCache','DawnWebGPUCache','GrShaderCache')) -Message "Browser target $($target.Id) must end in an exact basic-cache whitelist leaf."
+    Assert-False -Condition ($target.Path -match '\\Extensions(?:\\|$)|\\IndexedDB(?:\\|$)|\\Local Storage(?:\\|$)') -Message "Browser target $($target.Id) must not include extensions or account/site data."
+}
+$browserOfflineTargets = @(Get-CPanCleanerTarget -Include BrowserOfflineCache)
+Assert-False -Condition (@($browserOfflineTargets | Where-Object Default).Count -gt 0) -Message 'Service Worker offline cache must never be part of Default cleaning.'
+Assert-False -Condition (@($browserOfflineTargets | Where-Object Risk -ne 'Medium').Count -gt 0) -Message 'Service Worker offline cache must remain medium risk.'
+
+$browserFixture = Join-Path $env:TEMP ('cpancleaner-browser-' + [guid]::NewGuid().ToString('N'))
+$previousLocalAppData = $env:LOCALAPPDATA
+try {
+    $env:LOCALAPPDATA = $browserFixture
+    New-Item -ItemType Directory -Path (Join-Path $browserFixture 'Google\Chrome\User Data\Default\Cache') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $browserFixture 'Google\Chrome\User Data\Profile 12\Code Cache') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $browserFixture 'Google\Chrome\User Data\Profile Bad\Cache') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $browserFixture 'Google\Chrome\User Data\Default\Extensions') -Force | Out-Null
+    $discoveredBrowserTargets = @(Get-CPanBrowserCacheTargets)
+    Assert-True -Condition ($discoveredBrowserTargets.Count -eq 2) -Message 'Browser discovery should include Default and numeric Profile N caches only.'
+    Assert-False -Condition (@($discoveredBrowserTargets | Where-Object { $_.Path -match 'Profile Bad|Extensions' }).Count -gt 0) -Message 'Browser discovery must reject arbitrary profile names and extension data.'
+} finally {
+    $env:LOCALAPPDATA = $previousLocalAppData
+    if (Test-Path -LiteralPath $browserFixture) { Remove-Item -LiteralPath $browserFixture -Recurse -Force }
+}
+
+$qoderTargets = @(Get-CPanCleanerTarget -Include QoderCache)
+Assert-True -Condition ($qoderTargets.Count -eq 2) -Message 'Qoder cleanup must expose exactly index and cache targets.'
+Assert-False -Condition (@($qoderTargets | Where-Object { $_.Path -notmatch '\\SharedClientCache\\(index|cache)$' }).Count -gt 0) -Message 'Qoder cleanup must stay inside SharedClientCache index/cache leaves.'
+Assert-True -Condition (@(Get-CPanProcessBlockers -ProcessNames @('powershell')).Count -gt 0) -Message 'Process-blocker discovery should identify the current PowerShell test process.'
+
+$vsCodeTargets = @(Get-CPanCleanerTarget -Include VSCodeCache)
+Assert-False -Condition (@($vsCodeTargets | Where-Object { $_.Path -match '\\extensions\\' -and $_.Path -notmatch '(\\\.[0-9a-fA-F-]{36}$|\.vsctmp$)' }).Count -gt 0) -Message 'VS Code extension cleanup must only include UUID staging or .vsctmp directories.'
+Assert-False -Condition (@($vsCodeTargets | Where-Object { $_.Path -match '\\extensions\\.*\\|\\extensions\\\.obsolete$' }).Count -gt 0) -Message 'VS Code cleanup must not include current extension directories or .obsolete metadata.'
+
+$localizedCsv = @(ConvertFrom-CPanDiskUsageCsv -Lines @('SizeOnDisk,FileSize,Files,目录路径','4096,2048,3,C:\临时目录'))
+Assert-True -Condition ($localizedCsv.Count -eq 1 -and $localizedCsv[0].SizeOnDiskBytes -eq 4096 -and $localizedCsv[0].Path -eq 'C:\临时目录') -Message 'diskusage CSV parsing must ignore localized headers and preserve localized paths.'
+
+$downloadFixture = Join-Path (Join-Path $env:LOCALAPPDATA 'Temp') ('cpancleaner-downloads-' + [guid]::NewGuid().ToString('N'))
+$previousUserProfile = $env:USERPROFILE
+try {
+    $env:USERPROFILE = $downloadFixture
+    $downloadsFixture = Join-Path $downloadFixture 'Downloads'
+    $nestedFixture = Join-Path $downloadsFixture 'nested'
+    New-Item -ItemType Directory -Path $nestedFixture -Force | Out-Null
+    $directFile = Join-Path $downloadsFixture 'review.zip'
+    Set-Content -LiteralPath $directFile -Value 'before' -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $nestedFixture 'must-not-list.zip') -Value 'nested' -Encoding ASCII
+    $downloadLog = Join-Path $downloadFixture 'review.log'
+    New-Item -ItemType File -Path $downloadLog -Force | Out-Null
+    $downloadContext = [pscustomobject]@{ LogPath=$downloadLog; Quiet=$true }
+    $downloadPreview = @(Invoke-CPanDownloadReview -Context $downloadContext)
+    Assert-True -Condition ($downloadPreview.Count -eq 1 -and $downloadPreview[0].Path -eq $directFile) -Message ("Downloads review must list direct allowlisted files only. Count={0}; Paths={1}; Expected={2}" -f $downloadPreview.Count, (($downloadPreview | ForEach-Object Path) -join '|'), $directFile)
+    Add-Content -LiteralPath $directFile -Value 'changed' -Encoding ASCII
+    $changedApply = @(Invoke-CPanDownloadReview -Context $downloadContext -SelectedItemTokens @($downloadPreview[0].IdentityToken) -Apply)
+    Assert-True -Condition ($changedApply.Count -eq 1 -and $changedApply[0].Status -eq 'ChangedSkipped' -and (Test-Path -LiteralPath $directFile)) -Message 'Downloads apply must skip a file whose size or timestamp changed after preview.'
+} finally {
+    $env:USERPROFILE = $previousUserProfile
+    if (Test-Path -LiteralPath $downloadFixture) { Remove-Item -LiteralPath $downloadFixture -Recurse -Force }
+}
+
+$reparseTestRoot = Join-Path $env:TEMP ('cpancleaner-reparse-' + [guid]::NewGuid().ToString('N'))
+$reparseTarget = Join-Path $reparseTestRoot 'target'
+$reparseLink = Join-Path $reparseTestRoot 'link'
+try {
+    New-Item -ItemType Directory -Path $reparseTarget -Force | Out-Null
+    New-Item -ItemType Junction -Path $reparseLink -Target $reparseTarget | Out-Null
+    $reparseMeasurement = Measure-CPanPathSizeOnDisk -Path $reparseLink
+    Assert-True -Condition ($reparseMeasurement.Method -eq 'ReparsePointRejected') -Message 'Storage analysis must reject reparse-point roots.'
+} finally {
+    if (Test-Path -LiteralPath $reparseLink) { Remove-Item -LiteralPath $reparseLink -Force }
+    if (Test-Path -LiteralPath $reparseTarget) { Remove-Item -LiteralPath $reparseTarget -Force }
+    if (Test-Path -LiteralPath $reparseTestRoot) { Remove-Item -LiteralPath $reparseTestRoot -Force }
+}
+
+$nugetDestinationRejected = $false
+try { Test-CPanNuGetMigrationDestination -DestinationPath $env:TEMP | Out-Null } catch { $nugetDestinationRejected = $true }
+Assert-True -Condition $nugetDestinationRejected -Message 'NuGet migration must reject a C-drive or non-empty destination.'
+Assert-True -Condition ($moduleSource -match 'dotnet nuget locals \$nugetCacheName --clear') -Message 'NuGet cleanup must call the official dotnet nuget locals command.'
+Assert-True -Condition ($moduleSource -match 'LastWriteTimeUtcTicks') -Message 'Downloads apply must validate file modification identity.'
+Assert-True -Condition ($moduleSource -match 'GetExtension' -and $moduleSource -match [regex]::Escape("@('.exe','.msi','.zip','.crdownload')")) -Message 'Downloads deletion must enforce the exact extension whitelist.'
+Assert-True -Condition ($moduleSource -match [regex]::Escape("[Environment]::SetEnvironmentVariable('NUGET_PACKAGES',`$previousUserValue,'User')")) -Message 'NuGet prepare failures must restore the previous user-level package path.'
+Assert-True -Condition ($moduleSource -match "MigrationOperation -eq 'Rollback'") -Message 'NuGet migration must expose an explicit rollback branch.'
+Assert-True -Condition ($moduleSource -match '\.cpancleaner-staging-' -and $moduleSource -match 'Move-Item -LiteralPath \$stagingPath -Destination \$validated\.Path') -Message 'NuGet migration must verify a same-volume staging copy before committing the destination.'
 
 $forbiddenFragments = @(
     '\Documents',

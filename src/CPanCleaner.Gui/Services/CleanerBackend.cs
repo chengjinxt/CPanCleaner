@@ -34,7 +34,9 @@ public sealed class CleanerBackend
         int minimumAgeDays,
         CancellationToken cancellationToken,
         string? guardOperation = null,
-        int guardIntervalMinutes = 15)
+        int guardIntervalMinutes = 15,
+        string? destinationPath = null,
+        IReadOnlyCollection<string>? selectedItemTokens = null)
     {
         var script = feature.OperationKind.Equals("Widgets", StringComparison.OrdinalIgnoreCase)
             ? _widgetsScript
@@ -43,7 +45,7 @@ public sealed class CleanerBackend
         var resultDirectory = Path.Combine(Path.GetTempPath(), "CPanCleaner", "operation-results");
         Directory.CreateDirectory(resultDirectory);
         var resultPath = Path.Combine(resultDirectory, $"result-{Guid.NewGuid():N}.json");
-        var arguments = BuildArguments(feature, apply, minimumAgeDays, script, resultPath, guardOperation, guardIntervalMinutes);
+        var arguments = BuildArguments(feature, apply, minimumAgeDays, script, resultPath, guardOperation, guardIntervalMinutes, destinationPath, selectedItemTokens);
 
         if (requiresElevation)
         {
@@ -71,6 +73,7 @@ public sealed class CleanerBackend
         {
             using var process = new Process { StartInfo = startInfo };
             process.Start();
+            TrySetBelowNormalPriority(process);
             var outputTask = process.StandardOutput.ReadToEndAsync();
             var errorTask = process.StandardError.ReadToEndAsync();
 
@@ -129,6 +132,7 @@ public sealed class CleanerBackend
         {
             using var process = Process.Start(startInfo)
                 ?? throw new InvalidOperationException("无法启动管理员 PowerShell 进程。");
+            TrySetBelowNormalPriority(process);
 
             try
             {
@@ -181,7 +185,9 @@ public sealed class CleanerBackend
         string script,
         string? jsonOutputPath,
         string? guardOperation,
-        int guardIntervalMinutes)
+        int guardIntervalMinutes,
+        string? destinationPath,
+        IReadOnlyCollection<string>? selectedItemTokens)
     {
         var arguments = new List<string>
         {
@@ -204,6 +210,34 @@ public sealed class CleanerBackend
             arguments.Add("100000");
             arguments.Add("-RepositoryPath");
             arguments.Add(Environment.CurrentDirectory);
+        }
+
+        if (feature.Action.Equals("AnalyzeStorage", StringComparison.OrdinalIgnoreCase))
+        {
+            arguments.Add("-AnalysisScope");
+            arguments.Add(feature.AnalysisScope);
+        }
+
+        if (feature.Action.Equals("Migrate", StringComparison.OrdinalIgnoreCase))
+        {
+            arguments.Add("-MigrationTarget");
+            arguments.Add(feature.MigrationTarget);
+            arguments.Add("-MigrationOperation");
+            arguments.Add(feature.MigrationOperation);
+            if (!string.IsNullOrWhiteSpace(destinationPath))
+            {
+                arguments.Add("-DestinationPath");
+                arguments.Add(destinationPath);
+            }
+        }
+
+        if (feature.Action.Equals("ReviewDownloads", StringComparison.OrdinalIgnoreCase) && selectedItemTokens is { Count: > 0 })
+        {
+            arguments.Add("-SelectedItemTokens");
+            foreach (var token in selectedItemTokens)
+            {
+                arguments.Add(token);
+            }
         }
 
         if (feature.SupportsSchedule)
@@ -267,8 +301,19 @@ public sealed class CleanerBackend
                     Status = Coalesce(GetString(item, "Status"), GetString(item, "Mode")),
                     Risk = GetString(item, "Risk"),
                     EstimatedMB = GetNullableDouble(item, "EstimatedMB"),
+                    SizeOnDiskBytes = GetInt64(item, "SizeOnDiskBytes"),
+                    ReclaimableBytes = GetInt64(item, "ReclaimableBytes"),
                     Path = GetString(item, "Path"),
-                    Message = Coalesce(GetString(item, "Message"), GetString(item, "Notes"))
+                    Message = Coalesce(GetString(item, "Message"), GetString(item, "Notes")),
+                    Recommendation = GetString(item, "Recommendation"),
+                    ProcessBlockers = GetString(item, "ProcessBlockers"),
+                    MigrationSupport = GetString(item, "MigrationSupport"),
+                    CanSelect = GetBoolean(item, "CanSelect"),
+                    IdentityToken = GetString(item, "IdentityToken"),
+                    Sha256 = GetString(item, "Sha256"),
+                    Publisher = GetString(item, "Publisher"),
+                    LastWriteTime = GetString(item, "LastWriteTime"),
+                    Extension = GetString(item, "Extension")
                 });
             }
         }
@@ -380,6 +425,31 @@ public sealed class CleanerBackend
             return number;
         }
         return double.TryParse(value.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out number) ? number : null;
+    }
+
+    private static long GetInt64(JsonElement element, string name)
+    {
+        if (!TryGetProperty(element, name, out var value))
+        {
+            return 0;
+        }
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var number))
+        {
+            return number;
+        }
+        return long.TryParse(value.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out number) ? number : 0;
+    }
+
+    private static void TrySetBelowNormalPriority(Process process)
+    {
+        try
+        {
+            process.PriorityClass = ProcessPriorityClass.BelowNormal;
+        }
+        catch
+        {
+            // The process may exit immediately or an elevated process may deny priority changes.
+        }
     }
 
     private static string Coalesce(string first, string second) => string.IsNullOrWhiteSpace(first) ? second : first;

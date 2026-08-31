@@ -1,6 +1,6 @@
-Set-StrictMode -Version 2.0
+﻿Set-StrictMode -Version 2.0
 
-$script:CleanerVersion = '2.3.0'
+$script:CleanerVersion = '2.4.0'
 
 function Get-CPanSystemDrive {
     $drive = $env:SystemDrive
@@ -198,7 +198,10 @@ function New-CPanTarget {
         [bool] $Default = $false,
         [bool] $RequiresAdmin = $false,
         [bool] $UseAgeFilter = $true,
-        [string] $Description = ''
+        [string] $Description = '',
+        [string[]] $ProcessNames = @(),
+        [string] $Recommendation = '',
+        [string] $MigrationSupport = 'None'
     )
 
     return [pscustomobject]@{
@@ -212,7 +215,150 @@ function New-CPanTarget {
         RequiresAdmin = $RequiresAdmin
         UseAgeFilter = $UseAgeFilter
         Description = $Description
+        ProcessNames = @($ProcessNames)
+        Recommendation = $Recommendation
+        MigrationSupport = $MigrationSupport
     }
+}
+
+function Get-CPanProcessBlockers {
+    param([string[]] $ProcessNames = @())
+
+    if (-not $ProcessNames -or $ProcessNames.Count -eq 0) {
+        return @()
+    }
+
+    $wanted = @($ProcessNames | ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension($_) } | Where-Object { $_ } | Sort-Object -Unique)
+    $blockers = @()
+    foreach ($processName in $wanted) {
+        $blockers += @(Get-Process -Name $processName -ErrorAction SilentlyContinue | ForEach-Object {
+            '{0} (PID {1})' -f $_.ProcessName, $_.Id
+        })
+    }
+    return @($blockers | Sort-Object -Unique)
+}
+
+function Get-CPanBrowserCacheTargets {
+    $definitions = @()
+    if ($env:LOCALAPPDATA) {
+        $definitions = @(
+            [pscustomobject]@{ Browser = 'Chrome'; Root = (Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data'); Process = 'chrome' },
+            [pscustomobject]@{ Browser = 'Edge'; Root = (Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'); Process = 'msedge' }
+        )
+    }
+
+    $targets = @()
+    $basicLeaves = @('Cache', 'Code Cache', 'GPUCache', 'DawnGraphiteCache', 'DawnWebGPUCache', 'GrShaderCache')
+    foreach ($definition in $definitions) {
+        if (-not (Test-Path -LiteralPath $definition.Root -PathType Container)) {
+            continue
+        }
+
+        $profiles = @(Get-ChildItem -LiteralPath $definition.Root -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object {
+                -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and
+                ($_.Name -eq 'Default' -or $_.Name -eq 'Guest Profile' -or $_.Name -eq 'System Profile' -or $_.Name -match '^Profile \d+$')
+            })
+
+        foreach ($profile in $profiles) {
+            $safeProfile = ($profile.Name -replace '[^A-Za-z0-9]+', '')
+            foreach ($leaf in $basicLeaves) {
+                $leafPath = Join-Path $profile.FullName $leaf
+                if (-not (Test-Path -LiteralPath $leafPath -PathType Container)) {
+                    continue
+                }
+                $safeLeaf = ($leaf -replace '[^A-Za-z0-9]+', '')
+                $targets += New-CPanTarget -Id ("{0}{1}{2}" -f $definition.Browser, $safeProfile, $safeLeaf) `
+                    -Name ("{0} {1} - {2}" -f $definition.Browser, $profile.Name, $leaf) `
+                    -Path $leafPath -Kind 'DirectoryChildren' -Risk 'Low' -Category 'BrowserCache' -Default $true `
+                    -RequiresAdmin $false -UseAgeFilter $false -ProcessNames @($definition.Process) `
+                    -Recommendation '关闭浏览器后清理。缓存会自动重建，不影响书签、Cookie、密码和扩展。' `
+                    -Description '仅命中浏览器配置目录下精确白名单缓存叶目录。'
+            }
+
+            $offlineLeaves = @(
+                (Join-Path $profile.FullName 'Service Worker\CacheStorage'),
+                (Join-Path $profile.FullName 'ScriptCache')
+            )
+            foreach ($offlinePath in $offlineLeaves) {
+                if (-not (Test-Path -LiteralPath $offlinePath -PathType Container)) {
+                    continue
+                }
+                $safeLeaf = ((Split-Path -Leaf $offlinePath) -replace '[^A-Za-z0-9]+', '')
+                $targets += New-CPanTarget -Id ("{0}{1}Offline{2}" -f $definition.Browser, $safeProfile, $safeLeaf) `
+                    -Name ("{0} {1} - 离线网页缓存 {2}" -f $definition.Browser, $profile.Name, (Split-Path -Leaf $offlinePath)) `
+                    -Path $offlinePath -Kind 'DirectoryChildren' -Risk 'Medium' -Category 'BrowserOfflineCache' -Default $false `
+                    -RequiresAdmin $false -UseAgeFilter $false -ProcessNames @($definition.Process) `
+                    -Recommendation '会丢失网站离线副本并触发重新下载；关闭浏览器后单独确认。' `
+                    -Description 'Service Worker 或脚本离线缓存；不触碰站点 Cookie、IndexedDB、Local Storage 或账号数据。'
+            }
+        }
+    }
+    return $targets
+}
+
+function Get-CPanApplicationCacheTargets {
+    $targets = @()
+    $definitions = @()
+    if ($env:LOCALAPPDATA) {
+        $definitions += @(
+            [pscustomobject]@{ Id='NpmCache'; Name='npm download cache'; Relative='npm-cache'; Category='NpmCache'; Risk='Low'; Processes=@('node','npm'); Recommendation='后续 npm 安装会重新下载依赖。' },
+            [pscustomobject]@{ Id='JianyingCache'; Name='剪映可重建缓存'; Relative='JianyingPro\User Data\Cache'; Category='JianyingCache'; Risk='Low'; Processes=@('JianyingPro'); Recommendation='关闭剪映后清理；草稿和工程目录不在目标内。' },
+            [pscustomobject]@{ Id='JianyingLog'; Name='剪映日志'; Relative='JianyingPro\User Data\Log'; Category='JianyingCache'; Risk='Low'; Processes=@('JianyingPro'); Recommendation='仅删除日志，不触碰草稿。' },
+            [pscustomobject]@{ Id='NuGetV3Cache'; Name='NuGet HTTP v3 cache'; Relative='NuGet\v3-cache'; Category='NuGetCache'; Risk='Medium'; Processes=@('dotnet','devenv','MSBuild','nuget','VBCSCompiler'); Recommendation='优先使用官方 dotnet nuget locals 命令；后续还原包会重新下载。' },
+            [pscustomobject]@{ Id='NuGetPluginsCache'; Name='NuGet plugins cache'; Relative='NuGet\plugins-cache'; Category='NuGetCache'; Risk='Medium'; Processes=@('dotnet','devenv','MSBuild','nuget','VBCSCompiler'); Recommendation='关闭 Visual Studio、dotnet 和 NuGet 进程后执行。' },
+            [pscustomobject]@{ Id='PlaywrightCache'; Name='Playwright browser packages'; Relative='ms-playwright'; Category='PlaywrightCache'; Risk='Medium'; Processes=@('node','chrome','msedge'); Recommendation='后续 Playwright 测试会重新下载浏览器包。' },
+            [pscustomobject]@{ Id='PlaywrightGoCache'; Name='Playwright Go browser packages'; Relative='ms-playwright-go'; Category='PlaywrightCache'; Risk='Medium'; Processes=@('node','chrome','msedge'); Recommendation='后续测试会重新下载浏览器包。' }
+        )
+    }
+    if ($env:APPDATA) {
+        $definitions += @(
+            [pscustomobject]@{ Id='VSCodeVsixCache'; Name='VS Code downloaded VSIX cache'; Root=$env:APPDATA; Relative='Code\CachedExtensionVSIXs'; Category='VSCodeCache'; Risk='Low'; Processes=@('Code'); Recommendation='关闭 VS Code 后清理；已安装扩展不会被删除。' },
+            [pscustomobject]@{ Id='VSCodeCrashReports'; Name='VS Code crash reports'; Root=$env:APPDATA; Relative='Code\Crashpad\reports'; Category='VSCodeCache'; Risk='Low'; Processes=@('Code'); Recommendation='删除崩溃报告，不影响设置和扩展。' },
+            [pscustomobject]@{ Id='QoderIndex'; Name='Qoder local search index'; Root=$env:APPDATA; Relative='Qoder\SharedClientCache\index'; Category='QoderCache'; Risk='Medium'; Processes=@('Qoder'); Recommendation='会触发重新索引并暂时增加 CPU/磁盘占用，必须单独确认。' },
+            [pscustomobject]@{ Id='QoderSharedCache'; Name='Qoder shared client cache'; Root=$env:APPDATA; Relative='Qoder\SharedClientCache\cache'; Category='QoderCache'; Risk='Medium'; Processes=@('Qoder'); Recommendation='关闭 Qoder 后单独确认；不触碰设置、聊天和历史数据。' },
+            [pscustomobject]@{ Id='WpsDownloadCache'; Name='WPS download cache'; Root=$env:APPDATA; Relative='kingsoft\wps_download'; Category='WpsCache'; Risk='Low'; Processes=@('wps','wpp','et','wpspdf'); Recommendation='关闭 WPS 后清理；addons 和文档不在目标内。' },
+            [pscustomobject]@{ Id='WpsOfficeCache'; Name='WPS office cache'; Root=$env:APPDATA; Relative='kingsoft\office6\cache'; Category='WpsCache'; Risk='Low'; Processes=@('wps','wpp','et','wpspdf'); Recommendation='只处理明确缓存叶目录。' },
+            [pscustomobject]@{ Id='WpsOfficeLog'; Name='WPS logs'; Root=$env:APPDATA; Relative='kingsoft\office6\log'; Category='WpsCache'; Risk='Low'; Processes=@('wps','wpp','et','wpspdf'); Recommendation='只处理日志叶目录。' },
+            [pscustomobject]@{ Id='WXWorkUpgradeCache'; Name='企业微信升级包'; Root=$env:APPDATA; Relative='Tencent\WXWork\upgrade'; Category='WXWorkCache'; Risk='Medium'; Processes=@('WXWork'); Recommendation='后续升级可能重新下载；聊天记录不在目标内。' },
+            [pscustomobject]@{ Id='WXWorkLog'; Name='企业微信日志'; Root=$env:APPDATA; Relative='Tencent\WXWork\Log'; Category='WXWorkCache'; Risk='Medium'; Processes=@('WXWork'); Recommendation='仅处理日志，不触碰聊天记录。' },
+            [pscustomobject]@{ Id='XWeChatLog'; Name='微信日志'; Root=$env:APPDATA; Relative='Tencent\xwechat\log'; Category='WXWorkCache'; Risk='Medium'; Processes=@('xwechat','WeChat'); Recommendation='仅处理日志，不触碰聊天记录。' }
+        )
+    }
+
+    foreach ($definition in $definitions) {
+        $root = if ($definition.PSObject.Properties.Name -contains 'Root') { $definition.Root } else { $env:LOCALAPPDATA }
+        $path = Join-Path $root $definition.Relative
+        $targets += New-CPanTarget -Id $definition.Id -Name $definition.Name -Path $path -Kind 'DirectoryChildren' `
+            -Risk $definition.Risk -Category $definition.Category -Default $false -RequiresAdmin $false -UseAgeFilter $false `
+            -ProcessNames $definition.Processes -Recommendation $definition.Recommendation `
+            -Description '精确白名单中的可重建缓存、升级包或日志目录。'
+    }
+
+    if ($env:USERPROFILE) {
+        $nugetUserPath = [Environment]::GetEnvironmentVariable('NUGET_PACKAGES', 'User')
+        $nugetGlobalPath = if ([string]::IsNullOrWhiteSpace($nugetUserPath)) { Join-Path $env:USERPROFILE '.nuget\packages' } else { $nugetUserPath }
+        $targets += New-CPanTarget -Id 'NuGetGlobalPackages' -Name 'NuGet global packages cache' `
+            -Path $nugetGlobalPath -Kind 'DirectoryChildren' -Risk 'Medium' -Category 'NuGetCache' `
+            -Default $false -RequiresAdmin $false -UseAgeFilter $false -ProcessNames @('dotnet','devenv','MSBuild','nuget','VBCSCompiler') `
+            -Recommendation '通过官方 NuGet 缓存机制处理；所有包都可能在下次构建时重新下载。' -MigrationSupport 'Automatic' `
+            -Description 'NuGet 全局包缓存。支持经过验证的非 C 盘 NTFS 迁移。'
+
+        $extensionsRoot = Join-Path $env:USERPROFILE '.vscode\extensions'
+        if (Test-Path -LiteralPath $extensionsRoot -PathType Container) {
+            foreach ($temporaryExtension in Get-ChildItem -LiteralPath $extensionsRoot -Directory -Force -ErrorAction SilentlyContinue | Where-Object {
+                -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+                ($_.Name -match '^\.[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' -or $_.Name -match '\.vsctmp$')
+            }) {
+                $targets += New-CPanTarget -Id ('VSCodeExtensionTemp:' + ($temporaryExtension.Name -replace '[^A-Za-z0-9]+','')) `
+                    -Name ('VS Code failed extension install: ' + $temporaryExtension.Name) -Path $temporaryExtension.FullName -Kind 'DirectorySelf' `
+                    -Risk 'Low' -Category 'VSCodeCache' -Default $false -RequiresAdmin $false -UseAgeFilter $false -ProcessNames @('Code') `
+                    -Recommendation 'Close VS Code first. Only UUID staging directories and *.vsctmp are targeted; installed extensions and .obsolete are preserved.' `
+                    -Description 'Exact failed-extension-install staging directory pattern.'
+            }
+        }
+    }
+    return $targets
 }
 
 function Get-CPanStaticTargets {
@@ -309,10 +455,6 @@ function Get-CPanStaticTargets {
 
         $localCacheDefinitions = @(
             [pscustomobject]@{ Id = 'D3DSCache'; Name = 'Direct3D shader cache'; Relative = 'D3DSCache'; Category = 'GraphicsCache' },
-            [pscustomobject]@{ Id = 'EdgeCache'; Name = 'Microsoft Edge web cache'; Relative = 'Microsoft\Edge\User Data\Default\Cache'; Category = 'BrowserCache' },
-            [pscustomobject]@{ Id = 'EdgeCodeCache'; Name = 'Microsoft Edge code cache'; Relative = 'Microsoft\Edge\User Data\Default\Code Cache'; Category = 'BrowserCache' },
-            [pscustomobject]@{ Id = 'ChromeCache'; Name = 'Google Chrome web cache'; Relative = 'Google\Chrome\User Data\Default\Cache'; Category = 'BrowserCache' },
-            [pscustomobject]@{ Id = 'ChromeCodeCache'; Name = 'Google Chrome code cache'; Relative = 'Google\Chrome\User Data\Default\Code Cache'; Category = 'BrowserCache' },
             [pscustomobject]@{ Id = 'NvidiaDxCache'; Name = 'NVIDIA DirectX shader cache'; Relative = 'NVIDIA\DXCache'; Category = 'GraphicsCache' },
             [pscustomobject]@{ Id = 'NvidiaGlCache'; Name = 'NVIDIA OpenGL shader cache'; Relative = 'NVIDIA\GLCache'; Category = 'GraphicsCache' },
             [pscustomobject]@{ Id = 'AmdDxCache'; Name = 'AMD DirectX shader cache'; Relative = 'AMD\DxCache'; Category = 'GraphicsCache' },
@@ -534,6 +676,15 @@ function Get-CPanCleanerTarget {
         'CrashDumps',
         'CodexRuntimeCache',
         'BrowserCache',
+        'BrowserOfflineCache',
+        'VSCodeCache',
+        'NpmCache',
+        'JianyingCache',
+        'WpsCache',
+        'QoderCache',
+        'NuGetCache',
+        'PlaywrightCache',
+        'WXWorkCache',
         'GraphicsCache',
         'RemoteDesktopCache',
         'WindowsUpdate',
@@ -547,6 +698,8 @@ function Get-CPanCleanerTarget {
 
     $normalized = @($Include | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $targets = @(Get-CPanStaticTargets)
+    $targets += @(Get-CPanBrowserCacheTargets)
+    $targets += @(Get-CPanApplicationCacheTargets)
     if ($normalized -contains 'Default' -or $normalized -contains 'CodexRuntimeCache' -or $normalized -contains 'All' -or @($normalized | Where-Object { $_ -like 'CodexPreviousRuntime:*' }).Count -gt 0) {
         $targets += @(Get-CPanCodexPreviousRuntimeTargets)
     }
@@ -672,25 +825,7 @@ function Measure-CPanFileSystemItem {
         }
     }
 
-    $children = Get-ChildItem -LiteralPath $Item.FullName -Recurse -Force -ErrorAction SilentlyContinue |
-        Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) }
-    foreach ($child in $children) {
-        $count++
-        if ($child -is [System.IO.FileInfo]) {
-            $bytes += [int64] $child.Length
-        }
-
-        if ($count -ge $MaxScanItems) {
-            $truncated = $true
-            break
-        }
-    }
-
-    return [pscustomobject]@{
-        Bytes = $bytes
-        Count = $count
-        Truncated = $truncated
-    }
+    return Measure-CPanDirectoryByPath -Path $Item.FullName -MaxScanItems $MaxScanItems
 }
 
 function Measure-CPanTarget {
@@ -705,13 +840,21 @@ function Measure-CPanTarget {
 
     $exists = $Target.Path -and (Test-Path -LiteralPath $Target.Path)
     $bytes = [int64] 0
+    $sizeOnDiskBytes = [int64] 0
     $count = [int64] 0
     $truncated = $false
     $notes = @()
 
-    if ($exists -and $Target.Kind -eq 'RecycleBin') {
+    if ($exists -and -not $Target.UseAgeFilter -and $Target.Kind -in @('DirectoryChildren','DirectorySelf','FileSelf')) {
+        $diskMeasurement = Measure-CPanPathSizeOnDisk -Path $Target.Path -MaxScanItems $MaxScanItems
+        $bytes = [int64] $diskMeasurement.FileSizeBytes
+        $sizeOnDiskBytes = [int64] $diskMeasurement.SizeOnDiskBytes
+        $count = [int64] $diskMeasurement.FileCount
+        $truncated = [bool] $diskMeasurement.Truncated
+    } elseif ($exists -and $Target.Kind -eq 'RecycleBin') {
         $measurement = Measure-CPanDirectoryByPath -Path $Target.Path -MaxScanItems $MaxScanItems
         $bytes = $measurement.Bytes
+        $sizeOnDiskBytes = $measurement.Bytes
         $count = $measurement.Count
         $truncated = $measurement.Truncated
     } elseif ($exists) {
@@ -719,6 +862,7 @@ function Measure-CPanTarget {
         foreach ($candidate in $candidates) {
             $measurement = Measure-CPanFileSystemItem -Item $candidate -MaxScanItems $MaxScanItems
             $bytes += $measurement.Bytes
+            $sizeOnDiskBytes += $measurement.Bytes
             $count += $measurement.Count
             if ($measurement.Truncated) {
                 $truncated = $true
@@ -730,6 +874,7 @@ function Measure-CPanTarget {
         $notes += "Size estimate stopped after $MaxScanItems scanned items."
     }
 
+    $blockers = @(Get-CPanProcessBlockers -ProcessNames $Target.ProcessNames)
     return [pscustomobject]@{
         Id = $Target.Id
         Name = $Target.Name
@@ -741,9 +886,14 @@ function Measure-CPanTarget {
         Kind = $Target.Kind
         EstimatedBytes = $bytes
         EstimatedMB = [Math]::Round(($bytes / 1MB), 2)
+        SizeOnDiskBytes = $sizeOnDiskBytes
+        ReclaimableBytes = $sizeOnDiskBytes
         ItemCount = $count
         Notes = ($notes -join ' ')
         Description = $Target.Description
+        Recommendation = $Target.Recommendation
+        ProcessBlockers = ($blockers -join '; ')
+        MigrationSupport = $Target.MigrationSupport
     }
 }
 
@@ -763,19 +913,480 @@ function Measure-CPanDirectoryByPath {
         return [pscustomobject]@{ Bytes = [int64] 0; Count = [int64] 0; Truncated = $false }
     }
 
-    foreach ($child in Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue) {
-        $count++
-        if ($child -is [System.IO.FileInfo]) {
-            $bytes += [int64] $child.Length
-        }
-
-        if ($count -ge $MaxScanItems) {
-            $truncated = $true
-            break
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push((ConvertTo-CPanFullPath $Path))
+    while ($pending.Count -gt 0 -and -not $truncated) {
+        $current = $pending.Pop()
+        foreach ($child in Get-ChildItem -LiteralPath $current -Force -ErrorAction SilentlyContinue) {
+            if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+            $count++
+            if ($child -is [System.IO.FileInfo]) { $bytes += [int64] $child.Length }
+            elseif ($child.PSIsContainer) { $pending.Push($child.FullName) }
+            if ($count -ge $MaxScanItems) { $truncated = $true; break }
         }
     }
 
     return [pscustomobject]@{ Bytes = $bytes; Count = $count; Truncated = $truncated }
+}
+
+function ConvertFrom-CPanDiskUsageCsv {
+    param([string[]] $Lines)
+
+    $records = @()
+    foreach ($line in @($Lines)) {
+        if ([string]::IsNullOrWhiteSpace($line) -or $line -notmatch '^\s*(\d+),(\d+),(\d+),(.+)$') {
+            continue
+        }
+        $records += [pscustomobject]@{
+            SizeOnDiskBytes = [int64] $Matches[1]
+            FileSizeBytes = [int64] $Matches[2]
+            FileCount = [int64] $Matches[3]
+            Path = $Matches[4].Trim().Trim('"')
+        }
+    }
+    return $records
+}
+
+function Measure-CPanPathSizeOnDisk {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [int] $MaxScanItems = 100000
+    )
+
+    $fullPath = ConvertTo-CPanFullPath $Path
+    if (-not $fullPath -or -not (Test-Path -LiteralPath $fullPath)) {
+        return [pscustomobject]@{ SizeOnDiskBytes=[int64]0; FileSizeBytes=[int64]0; FileCount=[int64]0; Method='Missing'; Truncated=$false }
+    }
+
+    $item = Get-Item -LiteralPath $fullPath -Force -ErrorAction SilentlyContinue
+    if (-not $item -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        return [pscustomobject]@{ SizeOnDiskBytes=[int64]0; FileSizeBytes=[int64]0; FileCount=[int64]0; Method='ReparsePointRejected'; Truncated=$false }
+    }
+
+    $diskUsage = Get-Command diskusage.exe -ErrorAction SilentlyContinue
+    if ($diskUsage) {
+        try {
+            $lines = @(& $diskUsage.Source /c /d:0 /g:0x3 $fullPath 2>$null)
+            $record = @(ConvertFrom-CPanDiskUsageCsv -Lines $lines | Where-Object {
+                [string]::Equals((ConvertTo-CPanFullPath $_.Path), $fullPath, [StringComparison]::OrdinalIgnoreCase)
+            } | Select-Object -First 1)
+            if ($record.Count -gt 0) {
+                return [pscustomobject]@{
+                    SizeOnDiskBytes = [int64] $record[0].SizeOnDiskBytes
+                    FileSizeBytes = [int64] $record[0].FileSizeBytes
+                    FileCount = [int64] $record[0].FileCount
+                    Method = 'diskusage.exe'
+                    Truncated = $false
+                }
+            }
+        } catch {
+            # Continue with the bounded .NET fallback.
+        }
+    }
+
+    if ($item -is [System.IO.FileInfo]) {
+        return [pscustomobject]@{ SizeOnDiskBytes=[int64]$item.Length; FileSizeBytes=[int64]$item.Length; FileCount=[int64]1; Method='.NET bounded fallback'; Truncated=$false }
+    }
+    $fallback = Measure-CPanDirectoryByPath -Path $fullPath -MaxScanItems $MaxScanItems
+    return [pscustomobject]@{
+        SizeOnDiskBytes = [int64] $fallback.Bytes
+        FileSizeBytes = [int64] $fallback.Bytes
+        FileCount = [int64] $fallback.Count
+        Method = '.NET bounded fallback'
+        Truncated = [bool] $fallback.Truncated
+    }
+}
+
+function New-CPanStorageAnalysisItem {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Id,
+        [Parameter(Mandatory = $true)] [string] $Name,
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [string] $Risk = 'Low',
+        [string] $Recommendation = '',
+        [string] $MigrationSupport = 'None',
+        [string[]] $ProcessNames = @(),
+        [int64] $ReclaimableBytes = 0,
+        [int] $MaxScanItems = 100000
+    )
+
+    $measurement = Measure-CPanPathSizeOnDisk -Path $Path -MaxScanItems $MaxScanItems
+    $blockers = @(Get-CPanProcessBlockers -ProcessNames $ProcessNames)
+    $status = if ($measurement.Method -eq 'Missing') { 'Missing' } elseif ($measurement.Method -eq 'ReparsePointRejected') { 'SkippedReparsePoint' } elseif ($blockers.Count -gt 0) { 'BlockedByProcess' } else { 'Analyzed' }
+    return [pscustomobject]@{
+        Id = $Id
+        Name = $Name
+        Category = 'StorageAnalysis'
+        Risk = $Risk
+        Mode = 'ReadOnly'
+        Status = $status
+        Exists = $measurement.Method -ne 'Missing'
+        EstimatedBytes = [int64] $measurement.FileSizeBytes
+        EstimatedMB = [Math]::Round(($measurement.SizeOnDiskBytes / 1MB), 2)
+        SizeOnDiskBytes = [int64] $measurement.SizeOnDiskBytes
+        ReclaimableBytes = [Math]::Min([int64]$measurement.SizeOnDiskBytes, [Math]::Max([int64]0, $ReclaimableBytes))
+        ItemCount = [int64] $measurement.FileCount
+        RemovedCount = [int64] 0
+        Path = ConvertTo-CPanFullPath $Path
+        Message = "只读分析；方法=$($measurement.Method)" + $(if ($measurement.Truncated) { '; 回退扫描达到数量上限' } else { '' })
+        Recommendation = $Recommendation
+        ProcessBlockers = ($blockers -join '; ')
+        MigrationSupport = $MigrationSupport
+    }
+}
+
+function Get-CPanStorageAnalysis {
+    param(
+        [ValidateSet('Profile', 'Applications', 'All')] [string] $AnalysisScope = 'Profile',
+        [int] $MaxScanItems = 100000
+    )
+
+    $items = @()
+    $cleanupTargets = @(Get-CPanCleanerTarget -Include @('BrowserCache','BrowserOfflineCache','VSCodeCache','NpmCache','JianyingCache','WpsCache','QoderCache','NuGetCache','PlaywrightCache','WXWorkCache','Temp'))
+    $targetSizes = @{}
+    foreach ($target in $cleanupTargets) {
+        $m = Measure-CPanPathSizeOnDisk -Path $target.Path -MaxScanItems $MaxScanItems
+        $targetSizes[$target.Id] = [int64] $m.SizeOnDiskBytes
+    }
+
+    if ($AnalysisScope -eq 'Profile' -or $AnalysisScope -eq 'All') {
+        $profileDefinitions = @()
+        if ($env:LOCALAPPDATA) {
+            $profileDefinitions += @(
+                [pscustomobject]@{ Id='ChromeData'; Name='Google Chrome 用户数据'; Path=(Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data'); Match='Chrome'; Risk='Low'; Processes=@('chrome'); Recommendation='可清理所有配置的精确缓存白名单；不触碰账号数据。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='EdgeData'; Name='Microsoft Edge 用户数据'; Path=(Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'); Match='Edge'; Risk='Low'; Processes=@('msedge'); Recommendation='可清理所有配置的精确缓存白名单。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='JianyingData'; Name='剪映用户数据'; Path=(Join-Path $env:LOCALAPPDATA 'JianyingPro'); Match='Jianying'; Risk='Low'; Processes=@('JianyingPro'); Recommendation='只清理 Cache 和日志；草稿、工程与安装文件保留。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='DockerData'; Name='Docker Desktop 数据'; Path=(Join-Path $env:LOCALAPPDATA 'Docker'); Match='NoAutomaticMatch'; Risk='High'; Processes=@('Docker Desktop','com.docker.backend'); Recommendation='仅在 Docker Settings → Resources → Advanced 修改 Disk image location。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='NpmData'; Name='npm 缓存'; Path=(Join-Path $env:LOCALAPPDATA 'npm-cache'); Match='Npm'; Risk='Low'; Processes=@('node'); Recommendation='缓存可重建；后续安装会重新下载。'; Migration='None' },
+                [pscustomobject]@{ Id='PlaywrightData'; Name='Playwright 浏览器包'; Path=(Join-Path $env:LOCALAPPDATA 'ms-playwright'); Match='Playwright'; Risk='Medium'; Processes=@('node','chrome','msedge'); Recommendation='清理后测试会重新下载浏览器包。'; Migration='None' }
+            )
+        }
+        if ($env:APPDATA) {
+            $profileDefinitions += @(
+                [pscustomobject]@{ Id='QoderData'; Name='Qoder 用户数据'; Path=(Join-Path $env:APPDATA 'Qoder'); Match='Qoder'; Risk='Medium'; Processes=@('Qoder'); Recommendation='只处理 SharedClientCache\index 和 cache；设置、聊天、历史保留。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='TencentData'; Name='Tencent / 企业微信数据'; Path=(Join-Path $env:APPDATA 'Tencent'); Match='WXWork|XWeChat'; Risk='Medium'; Processes=@('WXWork','xwechat','WeChat'); Recommendation='仅处理升级包和明确日志；聊天记录保留。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='VSCodeData'; Name='VS Code 用户数据'; Path=(Join-Path $env:APPDATA 'Code'); Match='VSCode'; Risk='Low'; Processes=@('Code'); Recommendation='只处理 VSIX 下载缓存和崩溃报告；当前扩展保留。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='WpsData'; Name='WPS 用户数据'; Path=(Join-Path $env:APPDATA 'kingsoft'); Match='Wps'; Risk='Low'; Processes=@('wps','wpp','et','wpspdf'); Recommendation='只清理下载缓存和日志；addons 与文档保留。'; Migration='Guidance' }
+            )
+        }
+        if ($env:USERPROFILE) {
+            $profileDefinitions += @(
+                [pscustomobject]@{ Id='NuGetData'; Name='NuGet 全局包'; Path=(Join-Path $env:USERPROFILE '.nuget\packages'); Match='NuGetGlobal|NuGetV3|NuGetPlugins'; Risk='Medium'; Processes=@('dotnet','devenv','MSBuild','nuget'); Recommendation='可用内置事务流程迁移到非 C 盘本地 NTFS 空目录。'; Migration='Automatic' },
+                [pscustomobject]@{ Id='DocumentsData'; Name='Documents（受保护）'; Path=(Join-Path $env:USERPROFILE 'Documents'); Match='NoAutomaticMatch'; Risk='High'; Processes=@(); Recommendation='文档、聊天和项目不自动删除或迁移；请按应用设置逐项审查。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='DownloadsData'; Name='Downloads（逐文件审查）'; Path=(Join-Path $env:USERPROFILE 'Downloads'); Match='NoAutomaticMatch'; Risk='High'; Processes=@(); Recommendation='只列出直接文件，默认不选；文件变化时跳过。'; Migration='None' },
+                [pscustomobject]@{ Id='CodexData'; Name='Codex 用户数据（受保护）'; Path=(Join-Path $env:USERPROFILE '.codex'); Match='NoAutomaticMatch'; Risk='High'; Processes=@('Codex'); Recommendation='不自动清理或迁移当前 Codex 数据。'; Migration='Guidance' }
+            )
+        }
+
+        foreach ($definition in $profileDefinitions) {
+            $reclaimable = [int64] 0
+            foreach ($target in $cleanupTargets | Where-Object { $_.Id -match $definition.Match -or $_.Category -match $definition.Match }) {
+                $reclaimable += [int64] $targetSizes[$target.Id]
+            }
+            $items += New-CPanStorageAnalysisItem -Id $definition.Id -Name $definition.Name -Path $definition.Path -Risk $definition.Risk `
+                -Recommendation $definition.Recommendation -MigrationSupport $definition.Migration -ProcessNames $definition.Processes `
+                -ReclaimableBytes $reclaimable -MaxScanItems $MaxScanItems
+        }
+    }
+
+    if ($AnalysisScope -eq 'Applications' -or $AnalysisScope -eq 'All') {
+        $systemDrive = Get-CPanSystemDrive
+        $applicationDefinitions = @(
+            [pscustomobject]@{ Id='VisualStudio'; Name='Visual Studio 安装'; Path="$systemDrive\Program Files\Microsoft Visual Studio"; Risk='High'; Recommendation='打开 Visual Studio Installer 修改、卸载或重装；现有安装不能原地改盘符。'; Migration='Guidance'; Processes=@('devenv','MSBuild') },
+            [pscustomobject]@{ Id='VisualStudioX86'; Name='Visual Studio / SDK (x86)'; Path="${systemDrive}\Program Files (x86)\Microsoft Visual Studio"; Risk='High'; Recommendation='只通过 Visual Studio Installer 管理。'; Migration='Guidance'; Processes=@('devenv','MSBuild') },
+            [pscustomobject]@{ Id='WindowsKits'; Name='Windows Kits'; Path="${systemDrive}\Program Files (x86)\Windows Kits"; Risk='High'; Recommendation='禁止手工删除；通过安装器修改工作负载。'; Migration='None'; Processes=@('devenv','MSBuild') },
+            [pscustomobject]@{ Id='VsPackageCache'; Name='Visual Studio Package Cache（受保护）'; Path="$systemDrive\ProgramData\Package Cache"; Risk='High'; Recommendation='禁止整目录删除；仅使用工具现有的精确 Include 功能。'; Migration='None'; Processes=@('vs_installer','setup') },
+            [pscustomobject]@{ Id='WindowsApps'; Name='WindowsApps（受保护）'; Path="$systemDrive\Program Files\WindowsApps"; Risk='High'; Recommendation='禁止手工删除；通过“已安装的应用”移动或卸载。'; Migration='Guidance'; Processes=@() }
+        )
+        foreach ($definition in $applicationDefinitions) {
+            $items += New-CPanStorageAnalysisItem -Id $definition.Id -Name $definition.Name -Path $definition.Path -Risk $definition.Risk `
+                -Recommendation $definition.Recommendation -MigrationSupport $definition.Migration -ProcessNames $definition.Processes `
+                -ReclaimableBytes 0 -MaxScanItems $MaxScanItems
+        }
+        $packagesRoot = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Packages' } else { $null }
+        if ($packagesRoot -and (Test-Path -LiteralPath $packagesRoot -PathType Container)) {
+            foreach ($package in Get-ChildItem -LiteralPath $packagesRoot -Directory -Force -ErrorAction SilentlyContinue | Where-Object {
+                -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and (Test-Path -LiteralPath (Join-Path $_.FullName 'LocalState\ext4.vhdx') -PathType Leaf)
+            }) {
+                $items += New-CPanStorageAnalysisItem -Id ('Wsl:' + $package.Name) -Name ('WSL: ' + $package.Name) -Path (Join-Path $package.FullName 'LocalState') -Risk 'High' `
+                    -Recommendation '仅提供官方 export/import 向导；验证备份前不注销原发行版。' -MigrationSupport 'Guidance' `
+                    -ProcessNames @('wsl','wslservice','vmmemWSL') -ReclaimableBytes 0 -MaxScanItems $MaxScanItems
+            }
+        }
+    }
+    return $items
+}
+
+function ConvertTo-CPanDownloadIdentityToken {
+    param([Parameter(Mandatory = $true)] [System.IO.FileInfo] $File)
+
+    $identity = [pscustomobject]@{
+        Path = $File.FullName
+        Length = [int64] $File.Length
+        LastWriteTimeUtcTicks = [int64] $File.LastWriteTimeUtc.Ticks
+    }
+    $json = $identity | ConvertTo-Json -Compress
+    $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+    return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+}
+
+function ConvertFrom-CPanDownloadIdentityToken {
+    param([Parameter(Mandatory = $true)] [string] $Token)
+
+    $base64 = $Token.Replace('-','+').Replace('_','/')
+    switch ($base64.Length % 4) {
+        2 { $base64 += '==' }
+        3 { $base64 += '=' }
+    }
+    try {
+        return ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($base64)) | ConvertFrom-Json)
+    } catch {
+        return $null
+    }
+}
+
+function Test-CPanDownloadFileSafety {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+
+    if (-not $env:USERPROFILE) { return $false }
+    $downloads = ConvertTo-CPanFullPath (Join-Path $env:USERPROFILE 'Downloads')
+    $fullPath = ConvertTo-CPanFullPath $Path
+    if (-not $downloads -or -not $fullPath -or -not [string]::Equals((Split-Path -Parent $fullPath), $downloads, [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    if ([System.IO.Path]::GetExtension($fullPath).ToLowerInvariant() -notin @('.exe','.msi','.zip','.crdownload')) {
+        return $false
+    }
+    $item = Get-Item -LiteralPath $fullPath -Force -ErrorAction SilentlyContinue
+    return $item -is [System.IO.FileInfo] -and -not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+}
+
+function Invoke-CPanDownloadReview {
+    param(
+        [Parameter(Mandatory = $true)] [pscustomobject] $Context,
+        [string[]] $SelectedItemTokens = @(),
+        [switch] $Apply
+    )
+
+    $downloads = if ($env:USERPROFILE) { Join-Path $env:USERPROFILE 'Downloads' } else { $null }
+    if (-not $downloads -or -not (Test-Path -LiteralPath $downloads -PathType Container)) { return @() }
+    $items = @()
+    if (-not $Apply) {
+        foreach ($file in Get-ChildItem -LiteralPath $downloads -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension.ToLowerInvariant() -in @('.exe','.msi','.zip','.crdownload') } |
+            Sort-Object Length -Descending) {
+            if ($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+            $sha = if ($file.Length -le 256MB) { (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash } else { 'DeferredUntilApply' }
+            $signature = if ($file.Extension.ToLowerInvariant() -in @('.exe','.msi')) { Get-AuthenticodeSignature -LiteralPath $file.FullName -ErrorAction SilentlyContinue } else { $null }
+            $publisher = if ($signature -and $signature.SignerCertificate) { $signature.SignerCertificate.Subject } elseif ($signature) { $signature.Status.ToString() } else { 'NotApplicable' }
+            $items += [pscustomobject]@{
+                Id = 'DownloadFile'
+                Name = $file.Name
+                Category = 'DownloadsReview'
+                Risk = 'High'
+                Mode = 'DryRun'
+                Status = 'ReviewRequired'
+                Exists = $true
+                EstimatedBytes = [int64] $file.Length
+                EstimatedMB = [Math]::Round(($file.Length / 1MB), 2)
+                SizeOnDiskBytes = [int64] $file.Length
+                ReclaimableBytes = [int64] $file.Length
+                ItemCount = [int64] 1
+                RemovedCount = [int64] 0
+                Path = $file.FullName
+                Message = "类型=$($file.Extension); 修改时间=$($file.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')); 发布者=$publisher; SHA256=$sha"
+                Recommendation = '默认不选。确认文件不再需要后逐项勾选；永久删除前会再次校验路径、大小和修改时间。'
+                ProcessBlockers = ''
+                MigrationSupport = 'None'
+                CanSelect = $true
+                IdentityToken = ConvertTo-CPanDownloadIdentityToken -File $file
+                Sha256 = $sha
+                Publisher = $publisher
+                LastWriteTime = $file.LastWriteTime.ToString('o')
+                Extension = $file.Extension
+            }
+        }
+        return $items
+    }
+
+    foreach ($token in @($SelectedItemTokens | Where-Object { $_ })) {
+        $identity = ConvertFrom-CPanDownloadIdentityToken -Token $token
+        $path = if ($identity) { [string] $identity.Path } else { '' }
+        $status = 'ChangedSkipped'
+        $message = '文件身份令牌无效或文件状态已变化，已跳过。'
+        $bytes = [int64] 0
+        $sha = ''
+        if ($identity -and (Test-CPanDownloadFileSafety -Path $path)) {
+            $file = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if ($file -is [System.IO.FileInfo] -and [int64]$file.Length -eq [int64]$identity.Length -and [int64]$file.LastWriteTimeUtc.Ticks -eq [int64]$identity.LastWriteTimeUtcTicks) {
+                $bytes = [int64] $file.Length
+                $sha = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                try {
+                    Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                    $status = 'Deleted'
+                    $message = "已永久删除；执行前 SHA256=$sha"
+                    Write-CPanLog -Context $Context -Level 'INFO' -Message "Deleted selected Downloads file: $($file.FullName); SHA256=$sha"
+                } catch {
+                    $status = 'Failed'
+                    $message = $_.Exception.Message
+                }
+            }
+        }
+        $items += [pscustomobject]@{
+            Id='DownloadFile'; Name=$(if ($path) { Split-Path -Leaf $path } else { 'InvalidToken' }); Category='DownloadsReview'; Risk='High'; Mode='Apply'; Status=$status; Exists=(Test-Path -LiteralPath $path -ErrorAction SilentlyContinue)
+            EstimatedBytes=$bytes; EstimatedMB=[Math]::Round(($bytes/1MB),2); SizeOnDiskBytes=$bytes; ReclaimableBytes=$(if ($status -eq 'Deleted') {[int64]0} else {$bytes}); ItemCount=[int64]1; RemovedCount=$(if ($status -eq 'Deleted') {[int64]1} else {[int64]0})
+            Path=$path; Message=$message; Recommendation='状态变化的文件不会删除。'; ProcessBlockers=''; MigrationSupport='None'; CanSelect=$false; IdentityToken=''; Sha256=$sha; Publisher=''; LastWriteTime=''; Extension=[IO.Path]::GetExtension($path)
+        }
+    }
+    return $items
+}
+
+function Get-CPanNuGetMigrationStatePath {
+    $root = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'CPanCleaner\migrations' } else { Join-Path ([IO.Path]::GetTempPath()) 'CPanCleaner\migrations' }
+    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    return Join-Path $root 'nuget-global-packages.json'
+}
+
+function Get-CPanNuGetMigrationState {
+    $path = Get-CPanNuGetMigrationStatePath
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try { return Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+}
+
+function Test-CPanNuGetMigrationDestination {
+    param([Parameter(Mandatory = $true)] [string] $DestinationPath)
+
+    $destination = ConvertTo-CPanFullPath $DestinationPath
+    if (-not $destination -or -not (Test-Path -LiteralPath $destination -PathType Container)) { throw '迁移目标必须是已经创建的空目录。' }
+    $item = Get-Item -LiteralPath $destination -Force -ErrorAction Stop
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw '迁移目标不能是重解析点、符号链接或目录联接。' }
+    if ((Get-ChildItem -LiteralPath $destination -Force -ErrorAction Stop | Select-Object -First 1)) { throw '迁移目标必须为空目录。' }
+    $root = [IO.Path]::GetPathRoot($destination)
+    if ([string]::Equals($root.TrimEnd('\'), (Get-CPanSystemDrive), [StringComparison]::OrdinalIgnoreCase)) { throw '迁移目标必须位于非 C 盘。' }
+    $drive = New-Object IO.DriveInfo($root)
+    if ($drive.DriveType -ne [IO.DriveType]::Fixed -or -not $drive.IsReady) { throw '迁移目标必须位于已就绪的本地固定磁盘。' }
+    $volume = Get-Volume -DriveLetter $drive.Name.Substring(0,1) -ErrorAction SilentlyContinue
+    if (-not $volume -or $volume.FileSystem -ne 'NTFS') { throw '迁移目标必须位于 NTFS 分区。' }
+    return [pscustomobject]@{ Path=$destination; Drive=$drive }
+}
+
+function Copy-CPanDirectoryVerified {
+    param([Parameter(Mandatory=$true)][string]$Source,[Parameter(Mandatory=$true)][string]$Destination)
+
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    $null = & robocopy.exe $Source $Destination /E /COPY:DAT /DCOPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP
+    if ($LASTEXITCODE -gt 7) { throw "robocopy 失败，退出代码 $LASTEXITCODE。" }
+    $sourceMeasure = Measure-CPanDirectoryByPath -Path $Source -MaxScanItems 1000000
+    $destinationMeasure = Measure-CPanDirectoryByPath -Path $Destination -MaxScanItems 1000000
+    if ($sourceMeasure.Truncated -or $destinationMeasure.Truncated -or $destinationMeasure.Count -lt $sourceMeasure.Count -or $destinationMeasure.Bytes -lt $sourceMeasure.Bytes) {
+        throw '迁移副本的文件数量或逻辑大小校验失败。'
+    }
+    $missingChecksums = @(Get-ChildItem -LiteralPath $Source -Filter '*.nupkg.sha512' -File -Recurse -ErrorAction SilentlyContinue | Where-Object {
+        $relative = $_.FullName.Substring($Source.TrimEnd('\').Length).TrimStart('\')
+        -not (Test-Path -LiteralPath (Join-Path $Destination $relative) -PathType Leaf)
+    } | Select-Object -First 1)
+    if ($missingChecksums.Count -gt 0) { throw 'NuGet 包校验文件复制不完整。' }
+    return [pscustomobject]@{ SourceBytes=[int64]$sourceMeasure.Bytes; SourceCount=[int64]$sourceMeasure.Count; DestinationBytes=[int64]$destinationMeasure.Bytes; DestinationCount=[int64]$destinationMeasure.Count }
+}
+
+function Invoke-CPanNuGetMigration {
+    param(
+        [Parameter(Mandatory=$true)][pscustomobject]$Context,
+        [ValidateSet('Preview','Prepare','RemoveSource','Rollback')][string]$MigrationOperation='Preview',
+        [string]$DestinationPath,
+        [switch]$Apply
+    )
+
+    $source = ConvertTo-CPanFullPath (Join-Path $env:USERPROFILE '.nuget\packages')
+    $statePath = Get-CPanNuGetMigrationStatePath
+    $state = Get-CPanNuGetMigrationState
+    $blockers = @(Get-CPanProcessBlockers -ProcessNames @('dotnet','devenv','MSBuild','nuget','VBCSCompiler'))
+    $status = 'Ready'
+    $message = ''
+    $destination = if ($DestinationPath) { ConvertTo-CPanFullPath $DestinationPath } elseif ($state) { [string]$state.Destination } else { '' }
+    $sourceMeasure = Measure-CPanPathSizeOnDisk -Path $source -MaxScanItems 1000000
+
+    if (-not $Apply) {
+        if ($MigrationOperation -eq 'Prepare' -and $DestinationPath) {
+            $validated = Test-CPanNuGetMigrationDestination -DestinationPath $DestinationPath
+            if ($validated.Drive.AvailableFreeSpace -lt ($sourceMeasure.FileSizeBytes + 1GB)) { $status='InsufficientSpace'; $message='目标盘剩余空间不足（要求源逻辑大小再预留 1GB）。' }
+            else { $message='预检通过；执行后将复制、校验并切换用户级 NUGET_PACKAGES，原缓存仍保留。' }
+        } elseif ($MigrationOperation -eq 'RemoveSource') {
+            $status = if ($state) { 'SeparateConfirmationRequired' } else { 'NoMigrationState' }
+            $message = '仅在迁移副本和新进程解析均验证后，单独确认删除原缓存。'
+        } elseif ($MigrationOperation -eq 'Rollback') {
+            $status = if ($state) { 'RollbackAvailable' } else { 'NoMigrationState' }
+            $message = '回滚会恢复原用户级配置；若原缓存已删除，会先复制回 C 盘。目标副本不会自动删除。'
+        } else {
+            $message = '选择非 C 盘本地 NTFS 空目录后执行迁移预检。'
+        }
+    } elseif ($blockers.Count -gt 0) {
+        $status='BlockedByProcess'; $message='关闭 Visual Studio、dotnet、MSBuild、NuGet 相关进程后重试；程序不会自动结束它们。'
+    } elseif ($MigrationOperation -eq 'Prepare') {
+        $validated = Test-CPanNuGetMigrationDestination -DestinationPath $DestinationPath
+        if ($validated.Drive.AvailableFreeSpace -lt ($sourceMeasure.FileSizeBytes + 1GB)) { throw '目标盘剩余空间不足（要求源逻辑大小再预留 1GB）。' }
+        $previousUserValue = [Environment]::GetEnvironmentVariable('NUGET_PACKAGES','User')
+        $stagingPath = $validated.Path + '.cpancleaner-staging-' + [guid]::NewGuid().ToString('N')
+        $stagingRoot = [IO.Path]::GetPathRoot($stagingPath)
+        if (-not [string]::Equals($stagingRoot, [IO.Path]::GetPathRoot($validated.Path), [StringComparison]::OrdinalIgnoreCase)) { throw '迁移暂存目录必须与最终目标位于同一分区。' }
+        try {
+            $verification = Copy-CPanDirectoryVerified -Source $source -Destination $stagingPath
+            if ((Get-ChildItem -LiteralPath $validated.Path -Force -ErrorAction Stop | Select-Object -First 1)) { throw '最终目标在复制期间变为非空，拒绝提交。' }
+            Remove-Item -LiteralPath $validated.Path -Force -ErrorAction Stop
+            Move-Item -LiteralPath $stagingPath -Destination $validated.Path -ErrorAction Stop
+        } catch {
+            if (-not (Test-Path -LiteralPath $validated.Path)) { New-Item -ItemType Directory -Path $validated.Path -Force | Out-Null }
+            $resolvedStage = ConvertTo-CPanFullPath $stagingPath
+            $expectedStagePrefix = (ConvertTo-CPanFullPath $validated.Path) + '.cpancleaner-staging-'
+            if ($resolvedStage -and $resolvedStage.StartsWith($expectedStagePrefix, [StringComparison]::OrdinalIgnoreCase) -and
+                [string]::Equals((Split-Path -Parent $resolvedStage), (Split-Path -Parent $validated.Path), [StringComparison]::OrdinalIgnoreCase) -and
+                (Test-Path -LiteralPath $resolvedStage -PathType Container)) {
+                Remove-Item -LiteralPath $resolvedStage -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            throw
+        }
+        $manifest = [pscustomobject]@{ Version='2.4.0'; Source=$source; Destination=$validated.Path; PreviousUserValue=$previousUserValue; SourceBytes=$verification.SourceBytes; SourceCount=$verification.SourceCount; CopyVerified=$true; SourceRemoved=$false; PreparedAt=(Get-Date).ToString('o') }
+        $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        try {
+            [Environment]::SetEnvironmentVariable('NUGET_PACKAGES',$validated.Path,'User')
+            $oldProcessValue=$env:NUGET_PACKAGES
+            $env:NUGET_PACKAGES=$validated.Path
+            $resolved = (& dotnet nuget locals global-packages --list 2>&1 | Out-String).Trim()
+            $env:NUGET_PACKAGES=$oldProcessValue
+            if ($LASTEXITCODE -ne 0 -or $resolved -notlike "*$($validated.Path)*") { throw "新进程 NuGet 路径验证失败：$resolved" }
+            $status='PreparedAndSwitched'; $message='复制和校验完成，用户级 NUGET_PACKAGES 已切换；原缓存仍保留，需使用单独功能确认删除。'
+        } catch {
+            [Environment]::SetEnvironmentVariable('NUGET_PACKAGES',$previousUserValue,'User')
+            throw
+        }
+    } elseif ($MigrationOperation -eq 'RemoveSource') {
+        if (-not $state -or -not $state.CopyVerified) { throw '找不到已验证的 NuGet 迁移状态。' }
+        $expectedSource = ConvertTo-CPanFullPath (Join-Path $env:USERPROFILE '.nuget\packages')
+        if (-not [string]::Equals((ConvertTo-CPanFullPath $state.Source),$expectedSource,[StringComparison]::OrdinalIgnoreCase)) { throw '迁移清单中的源路径不符合固定安全边界。' }
+        $currentUserValue=[Environment]::GetEnvironmentVariable('NUGET_PACKAGES','User')
+        if (-not [string]::Equals((ConvertTo-CPanFullPath $currentUserValue),(ConvertTo-CPanFullPath $state.Destination),[StringComparison]::OrdinalIgnoreCase)) { throw '当前用户级 NUGET_PACKAGES 与迁移清单不一致。' }
+        $verification = Copy-CPanDirectoryVerified -Source $state.Source -Destination $state.Destination
+        $target = New-CPanTarget -Id 'NuGetMigrationSource' -Name 'NuGet original global packages' -Path $state.Source -Kind 'DirectoryChildren' -Risk 'Medium' -Category 'NuGetMigration' -UseAgeFilter $false
+        foreach ($candidate in @(Get-CPanCandidateItems -Target $target)) { $removed=Remove-CPanSafeItem -Item $candidate -AllowedRoot $state.Source -Context $Context; if (-not $removed.Removed) { throw "无法删除原缓存：$($removed.Error)" } }
+        $state.SourceRemoved=$true; $state | Add-Member -NotePropertyName SourceRemovedAt -NotePropertyValue (Get-Date).ToString('o') -Force; $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        $status='SourceRemoved'; $message='原 NuGet 缓存已删除；目标副本和回滚清单已保留。'
+    } elseif ($MigrationOperation -eq 'Rollback') {
+        if (-not $state) { throw '找不到 NuGet 迁移状态。' }
+        if ($state.SourceRemoved) {
+            $systemDriveInfo=New-Object IO.DriveInfo((Get-CPanSystemDrive)+'\')
+            if ($systemDriveInfo.AvailableFreeSpace -lt ([int64]$state.SourceBytes + 1GB)) { throw 'C 盘空间不足，无法安全复制回原缓存。' }
+            Copy-CPanDirectoryVerified -Source $state.Destination -Destination $state.Source | Out-Null
+        }
+        [Environment]::SetEnvironmentVariable('NUGET_PACKAGES',$state.PreviousUserValue,'User')
+        $state | Add-Member -NotePropertyName RolledBackAt -NotePropertyValue (Get-Date).ToString('o') -Force; $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        $status='RolledBack'; $message='用户级 NuGet 路径已恢复；目标副本未删除，可人工确认后处理。'
+    }
+
+    return [pscustomobject]@{
+        Id='NuGetPackagesMigration'; Name='NuGet 全局包迁移'; Category='Migration'; Risk='Medium'; Mode=$(if($Apply){'Apply'}else{'DryRun'}); Status=$status; Exists=(Test-Path -LiteralPath $source)
+        EstimatedBytes=[int64]$sourceMeasure.FileSizeBytes; EstimatedMB=[Math]::Round(($sourceMeasure.SizeOnDiskBytes/1MB),2); SizeOnDiskBytes=[int64]$sourceMeasure.SizeOnDiskBytes; ReclaimableBytes=$(if($MigrationOperation -eq 'RemoveSource'){[int64]$sourceMeasure.SizeOnDiskBytes}else{[int64]0})
+        ItemCount=[int64]$sourceMeasure.FileCount; RemovedCount=[int64]0; Path=$(if($destination){$destination}else{$source}); Message=$message; Recommendation='迁移 Prepare 不删除源；RemoveSource 和 Rollback 分开确认。'; ProcessBlockers=($blockers -join '; '); MigrationSupport='Automatic'; StatePath=$statePath
+    }
 }
 
 function Invoke-CPanWindowsUpdatePause {
@@ -2384,6 +2995,7 @@ function Invoke-CPanCleanTarget {
     )
 
     $measurement = Measure-CPanTarget -Target $Target -MinimumAgeDays $MinimumAgeDays -MinimumAgeHours $MinimumAgeHours
+    $blockers = @(Get-CPanProcessBlockers -ProcessNames $Target.ProcessNames)
     $mode = if ($Apply) { 'Apply' } else { 'DryRun' }
     $status = 'WouldClean'
     $removedCount = [int64] 0
@@ -2400,10 +3012,15 @@ function Invoke-CPanCleanTarget {
             Status = $status
             Exists = $measurement.Exists
             EstimatedMB = $measurement.EstimatedMB
+            SizeOnDiskBytes = $measurement.SizeOnDiskBytes
+            ReclaimableBytes = $measurement.ReclaimableBytes
             ItemCount = $measurement.ItemCount
             RemovedCount = $removedCount
             Path = $Target.Path
             Message = 'Path does not exist.'
+            Recommendation = $Target.Recommendation
+            ProcessBlockers = ($blockers -join '; ')
+            MigrationSupport = $Target.MigrationSupport
         }
     }
 
@@ -2419,10 +3036,38 @@ function Invoke-CPanCleanTarget {
             Status = $status
             Exists = $measurement.Exists
             EstimatedMB = $measurement.EstimatedMB
+            SizeOnDiskBytes = $measurement.SizeOnDiskBytes
+            ReclaimableBytes = $measurement.ReclaimableBytes
             ItemCount = $measurement.ItemCount
             RemovedCount = $removedCount
             Path = $Target.Path
             Message = 'Run again as Administrator, or use the wrapper -Elevate switch.'
+            Recommendation = $Target.Recommendation
+            ProcessBlockers = ($blockers -join '; ')
+            MigrationSupport = $Target.MigrationSupport
+        }
+    }
+
+    if ($Apply -and $blockers.Count -gt 0) {
+        Write-CPanLog -Context $Context -Level 'WARN' -Message "Skipping $($Target.Id); blocking processes: $($blockers -join ', ')"
+        return [pscustomobject]@{
+            Id = $Target.Id
+            Name = $Target.Name
+            Category = $Target.Category
+            Risk = $Target.Risk
+            Mode = $mode
+            Status = 'BlockedByProcess'
+            Exists = $measurement.Exists
+            EstimatedMB = $measurement.EstimatedMB
+            SizeOnDiskBytes = $measurement.SizeOnDiskBytes
+            ReclaimableBytes = $measurement.ReclaimableBytes
+            ItemCount = $measurement.ItemCount
+            RemovedCount = $removedCount
+            Path = $Target.Path
+            Message = 'Close the listed application processes manually and preview again. CPanCleaner never ends them automatically.'
+            Recommendation = $Target.Recommendation
+            ProcessBlockers = ($blockers -join '; ')
+            MigrationSupport = $Target.MigrationSupport
         }
     }
 
@@ -2437,10 +3082,15 @@ function Invoke-CPanCleanTarget {
             Status = $status
             Exists = $measurement.Exists
             EstimatedMB = $measurement.EstimatedMB
+            SizeOnDiskBytes = $measurement.SizeOnDiskBytes
+            ReclaimableBytes = $measurement.ReclaimableBytes
             ItemCount = $measurement.ItemCount
             RemovedCount = $removedCount
             Path = $Target.Path
             Message = 'Dry-run only. Pass -Apply to remove candidates.'
+            Recommendation = $Target.Recommendation
+            ProcessBlockers = ($blockers -join '; ')
+            MigrationSupport = $Target.MigrationSupport
         }
     }
 
@@ -2462,10 +3112,15 @@ function Invoke-CPanCleanTarget {
                 Status = 'PartialOrFailed'
                 Exists = $measurement.Exists
                 EstimatedMB = $measurement.EstimatedMB
+                SizeOnDiskBytes = $measurement.SizeOnDiskBytes
+                ReclaimableBytes = $measurement.ReclaimableBytes
                 ItemCount = $measurement.ItemCount
                 RemovedCount = $removedCount
                 Path = $Target.Path
                 Message = 'NLSvc could not be stopped safely; nlstats.db was not removed.'
+                Recommendation = $Target.Recommendation
+                ProcessBlockers = ($blockers -join '; ')
+                MigrationSupport = $Target.MigrationSupport
             }
         }
     }
@@ -2480,6 +3135,32 @@ function Invoke-CPanCleanTarget {
                 $status = 'PartialOrFailed'
                 $errors += $_.Exception.Message
                 Write-CPanLog -Context $Context -Level 'WARN' -Message "Failed to empty recycle bin: $($_.Exception.Message)"
+            }
+        } elseif ($Target.Category -eq 'NuGetCache') {
+            $nugetCacheName = switch ($Target.Id) {
+                'NuGetGlobalPackages' { 'global-packages' }
+                'NuGetV3Cache' { 'http-cache' }
+                'NuGetPluginsCache' { 'plugins-cache' }
+                default { $null }
+            }
+            if (-not $nugetCacheName) {
+                $status = 'PartialOrFailed'
+                $errors += 'No official NuGet cache mapping exists for this target.'
+            } else {
+                $oldNuGetPackages = $env:NUGET_PACKAGES
+                $userNuGetPackages = [Environment]::GetEnvironmentVariable('NUGET_PACKAGES', 'User')
+                if (-not [string]::IsNullOrWhiteSpace($userNuGetPackages)) { $env:NUGET_PACKAGES = $userNuGetPackages }
+                $nugetOutput = (& dotnet nuget locals $nugetCacheName --clear 2>&1 | Out-String).Trim()
+                $nugetExitCode = $LASTEXITCODE
+                $env:NUGET_PACKAGES = $oldNuGetPackages
+                if ($nugetExitCode -eq 0) {
+                    $status = 'Cleaned'
+                    $removedCount = $measurement.ItemCount
+                    Write-CPanLog -Context $Context -Level 'INFO' -Message "NuGet official cache clear completed: $nugetCacheName. $nugetOutput"
+                } else {
+                    $status = 'PartialOrFailed'
+                    $errors += $nugetOutput
+                }
             }
         } else {
             $candidates = @(Get-CPanCandidateItems -Target $Target -MinimumAgeDays $MinimumAgeDays -MinimumAgeHours $MinimumAgeHours)
@@ -2510,10 +3191,15 @@ function Invoke-CPanCleanTarget {
         Status = $status
         Exists = $measurement.Exists
         EstimatedMB = $measurement.EstimatedMB
+        SizeOnDiskBytes = $measurement.SizeOnDiskBytes
+        ReclaimableBytes = if ($status -eq 'Cleaned') { [int64] 0 } else { $measurement.ReclaimableBytes }
         ItemCount = $measurement.ItemCount
         RemovedCount = $removedCount
         Path = $Target.Path
         Message = ($errors -join ' | ')
+        Recommendation = $Target.Recommendation
+        ProcessBlockers = ($blockers -join '; ')
+        MigrationSupport = $Target.MigrationSupport
     }
 }
 
@@ -2635,7 +3321,7 @@ function Get-CPanDiagnostics {
 function Invoke-CPanCleaner {
     [CmdletBinding()]
     param(
-        [ValidateSet('Scan', 'Clean', 'Diagnose', 'DisableWindowsUpdate', 'OptimizePerformance', 'PreventPerformanceSpikes', 'ManageGuard', 'RepairRunHistory')]
+        [ValidateSet('Scan', 'Clean', 'AnalyzeStorage', 'ReviewDownloads', 'Migrate', 'Diagnose', 'DisableWindowsUpdate', 'OptimizePerformance', 'PreventPerformanceSpikes', 'ManageGuard', 'RepairRunHistory')]
         [string] $Action = 'Scan',
 
         [string[]] $Include = @('Default'),
@@ -2645,6 +3331,14 @@ function Invoke-CPanCleaner {
         [int] $MinimumAgeDays = 1,
         [int] $MinimumAgeHours = -1,
         [int] $MaxScanItems = 100000,
+        [ValidateSet('Profile', 'Applications', 'All')]
+        [string] $AnalysisScope = 'Profile',
+        [ValidateSet('NuGetPackages')]
+        [string] $MigrationTarget = 'NuGetPackages',
+        [ValidateSet('Preview', 'Prepare', 'RemoveSource', 'Rollback')]
+        [string] $MigrationOperation = 'Preview',
+        [string] $DestinationPath,
+        [string[]] $SelectedItemTokens = @(),
         [string] $LogDirectory,
         [string] $CsvPath,
         [string] $RepositoryPath = (Get-Location).Path,
@@ -2670,7 +3364,14 @@ function Invoke-CPanCleaner {
     $items = @()
     $diagnostics = @()
 
-    if ($Action -eq 'Diagnose') {
+    if ($Action -eq 'AnalyzeStorage') {
+        $items = @(Get-CPanStorageAnalysis -AnalysisScope $AnalysisScope -MaxScanItems $MaxScanItems)
+    } elseif ($Action -eq 'ReviewDownloads') {
+        $items = @(Invoke-CPanDownloadReview -Context $context -SelectedItemTokens $SelectedItemTokens -Apply:$effectiveApply)
+    } elseif ($Action -eq 'Migrate') {
+        if ($MigrationTarget -ne 'NuGetPackages') { throw "Unsupported migration target: $MigrationTarget" }
+        $items = @(Invoke-CPanNuGetMigration -Context $context -MigrationOperation $MigrationOperation -DestinationPath $DestinationPath -Apply:$effectiveApply)
+    } elseif ($Action -eq 'Diagnose') {
         $diagnostics = @(Get-CPanDiagnostics -RepositoryPath $RepositoryPath)
     } elseif ($Action -eq 'DisableWindowsUpdate') {
         $diagnostics = @(Invoke-CPanDisableWindowsUpdateDownloads -Context $context -Apply:$effectiveApply -IsAdmin $isAdmin)
@@ -2715,11 +3416,14 @@ function Invoke-CPanCleaner {
     $summary = [pscustomobject]@{
         Version = $script:CleanerVersion
         Action = $Action
-        Mode = if (($Action -eq 'Clean' -or $Action -eq 'DisableWindowsUpdate' -or $Action -eq 'OptimizePerformance' -or $Action -eq 'PreventPerformanceSpikes' -or $Action -eq 'RepairRunHistory' -or ($Action -eq 'ManageGuard' -and $GuardOperation -ne 'Status')) -and $effectiveApply) { 'Apply' } elseif ($Action -eq 'Clean' -or $Action -eq 'DisableWindowsUpdate' -or $Action -eq 'OptimizePerformance' -or $Action -eq 'PreventPerformanceSpikes' -or $Action -eq 'RepairRunHistory' -or ($Action -eq 'ManageGuard' -and $GuardOperation -ne 'Status')) { 'DryRun' } else { 'ReadOnly' }
+        Mode = if (($Action -in @('Clean','ReviewDownloads','Migrate','DisableWindowsUpdate','OptimizePerformance','PreventPerformanceSpikes','RepairRunHistory') -or ($Action -eq 'ManageGuard' -and $GuardOperation -ne 'Status')) -and $effectiveApply) { 'Apply' } elseif ($Action -in @('Clean','ReviewDownloads','Migrate','DisableWindowsUpdate','OptimizePerformance','PreventPerformanceSpikes','RepairRunHistory') -or ($Action -eq 'ManageGuard' -and $GuardOperation -ne 'Status')) { 'DryRun' } else { 'ReadOnly' }
         IsAdministrator = $isAdmin
         Include = ($Include -join ',')
         MinimumAgeDays = $MinimumAgeDays
         MinimumAgeHours = $MinimumAgeHours
+        AnalysisScope = $AnalysisScope
+        MigrationTarget = $MigrationTarget
+        MigrationOperation = $MigrationOperation
         LogPath = $context.LogPath
         CsvPath = $effectiveCsvPath
         Items = $items
@@ -2747,10 +3451,18 @@ function Format-CPanBytes {
 
 Export-ModuleMember -Function @(
     'Get-CPanCleanerTarget',
+    'Get-CPanBrowserCacheTargets',
+    'Get-CPanStorageAnalysis',
+    'Get-CPanProcessBlockers',
     'Get-CPanDiagnostics',
     'Invoke-CPanCleaner',
     'Test-CPanAdministrator',
     'Test-CPanPathSafety',
     'ConvertTo-CPanFullPath',
+    'ConvertFrom-CPanDiskUsageCsv',
+    'Measure-CPanPathSizeOnDisk',
+    'Test-CPanDownloadFileSafety',
+    'Invoke-CPanDownloadReview',
+    'Test-CPanNuGetMigrationDestination',
     'Format-CPanBytes'
 )

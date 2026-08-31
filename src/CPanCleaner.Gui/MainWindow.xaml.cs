@@ -11,6 +11,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using CPanCleaner.Gui.Models;
 using CPanCleaner.Gui.Services;
+using MessageBox = System.Windows.MessageBox;
 
 namespace CPanCleaner.Gui;
 
@@ -99,7 +100,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
-    private static void BindFeatureList(ListBox listBox, IEnumerable<CleanerFeature> features)
+    private static void BindFeatureList(System.Windows.Controls.ListBox listBox, IEnumerable<CleanerFeature> features)
     {
         var collection = new ObservableCollection<CleanerFeature>(
             features.OrderBy(feature => feature.Group).ThenBy(feature => feature.Title));
@@ -110,7 +111,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void FeatureList_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (sender is not ListBox selectedList || selectedList.SelectedItem is not CleanerFeature feature)
+        if (sender is not System.Windows.Controls.ListBox selectedList || selectedList.SelectedItem is not CleanerFeature feature)
         {
             return;
         }
@@ -123,10 +124,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
         }
         SelectedFeature = feature;
+        Results.Clear();
         var usesMinimumAge = feature.Action.Equals("Clean", StringComparison.OrdinalIgnoreCase) ||
                              feature.Action.Equals("Scan", StringComparison.OrdinalIgnoreCase);
         MinimumAgePanel.Visibility = usesMinimumAge ? Visibility.Visible : Visibility.Collapsed;
         GuardSchedulePanel.Visibility = feature.SupportsSchedule ? Visibility.Visible : Visibility.Collapsed;
+        DestinationPanel.Visibility = feature.RequiresDestination ? Visibility.Visible : Visibility.Collapsed;
         DisableGuardButton.Visibility = feature.SupportsSchedule ? Visibility.Visible : Visibility.Collapsed;
         if (feature.SupportsSchedule)
         {
@@ -166,11 +169,54 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void ApplyButton_OnClick(object sender, RoutedEventArgs e)
     {
-        if (SelectedFeature is null || !SelectedFeature.SupportsApply || !ConfirmApply(SelectedFeature))
+        if (SelectedFeature is null || !SelectedFeature.SupportsApply)
+        {
+            return;
+        }
+        if (SelectedFeature.OperationKind.Equals("Guidance", StringComparison.OrdinalIgnoreCase))
+        {
+            var executable = Environment.ExpandEnvironmentVariables(SelectedFeature.GuidanceExecutable);
+            if (!string.IsNullOrWhiteSpace(executable) && File.Exists(executable))
+            {
+                Process.Start(new ProcessStartInfo { FileName = executable, UseShellExecute = true });
+                StatusText = $"已打开 {SelectedFeature.Title} 对应的官方管理程序；CPanCleaner 未移动或删除数据。";
+            }
+            else if (Uri.TryCreate(SelectedFeature.GuidanceUrl, UriKind.Absolute, out var guidanceUri))
+            {
+                Process.Start(new ProcessStartInfo { FileName = guidanceUri.AbsoluteUri, UseShellExecute = true });
+                StatusText = $"已打开 {SelectedFeature.Title} 的官方说明；CPanCleaner 未修改任何数据。";
+            }
+            return;
+        }
+        if (SelectedFeature.RequiresDestination && string.IsNullOrWhiteSpace(DestinationPathBox.Text))
+        {
+            MessageBox.Show(this, "请先选择非 C 盘本地 NTFS 空目录。", "缺少迁移目标", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        if (SelectedFeature.SelectableResults && !Results.Any(item => item.CanSelect && item.IsSelected))
+        {
+            MessageBox.Show(this, "请先在预览结果中逐项勾选要永久删除的文件。", "尚未选择文件", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        if (!ConfirmApply(SelectedFeature))
         {
             return;
         }
         await RunSelectedFeatureAsync(apply: true, guardOperation: SelectedFeature.SupportsSchedule ? "Enable" : null);
+    }
+
+    private void BrowseDestinationButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        using var dialog = new System.Windows.Forms.FolderBrowserDialog
+        {
+            Description = "选择非 C 盘本地 NTFS 空目录",
+            UseDescriptionForTitle = true,
+            ShowNewFolderButton = true
+        };
+        if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+        {
+            DestinationPathBox.Text = dialog.SelectedPath;
+        }
     }
 
     private async void DisableGuardButton_OnClick(object sender, RoutedEventArgs e)
@@ -213,6 +259,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        var selectedTokens = apply && feature.SelectableResults
+            ? Results.Where(item => item.CanSelect && item.IsSelected && !string.IsNullOrWhiteSpace(item.IdentityToken))
+                .Select(item => item.IdentityToken).ToArray()
+            : Array.Empty<string>();
         Results.Clear();
         _operationCancellation?.Cancel();
         var operationCancellation = new CancellationTokenSource();
@@ -222,7 +272,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         try
         {
-            var result = await _backend.RunAsync(feature, apply, minimumAgeDays, operationCancellation.Token, guardOperation, guardIntervalMinutes);
+            var result = await _backend.RunAsync(
+                feature,
+                apply,
+                minimumAgeDays,
+                operationCancellation.Token,
+                guardOperation,
+                guardIntervalMinutes,
+                feature.RequiresDestination ? DestinationPathBox.Text.Trim() : null,
+                selectedTokens);
             if (!ReferenceEquals(SelectedFeature, feature))
             {
                 return;
@@ -296,7 +354,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if (feature.Risk == "High")
         {
-            var dialog = new HighRiskConfirmationWindow(feature) { Owner = this };
+            var selected = Results.Where(item => item.CanSelect && item.IsSelected).ToArray();
+            var details = selected.Length == 0
+                ? null
+                : $"本次明确勾选 {selected.Length} 个文件，共 {selected.Sum(item => item.SizeOnDiskBytes) / 1024d / 1024d / 1024d:N2} GB：\n" +
+                  string.Join("\n", selected.Take(8).Select(item => "• " + item.Name)) +
+                  (selected.Length > 8 ? $"\n…另有 {selected.Length - 8} 个文件" : string.Empty);
+            var dialog = new HighRiskConfirmationWindow(feature, details) { Owner = this };
             return dialog.ShowDialog() == true;
         }
 

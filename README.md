@@ -1,6 +1,6 @@
 # CPanCleaner
 
-CPanCleaner 2.3.0 是一个面向 Windows 10/11 的 C# WPF 图形化空间与性能维护工具。界面按风险分为“安全 / 中等风险 / 高风险”三个 Tab；每个 Tab 再按用途分组，选择功能后会动态显示实现原理、可能影响、涉及路径、权限要求、安全护栏和历史来源。
+CPanCleaner 2.4.0 是一个面向 Windows 10/11 的 C# WPF 图形化空间与性能维护工具。界面按风险分为“安全 / 中等风险 / 高风险”三个 Tab；每个 Tab 再按用途分组，选择功能后会动态显示实现原理、可能影响、涉及路径、权限要求、安全护栏和历史来源。
 
 工具仍遵循“先扫描或 dry-run、再明确确认、最后 apply”的执行模型。PowerShell 后端保留系统操作的可审计性，C# 只负责界面、异步执行、结果展示、UAC 和风险确认。
 
@@ -20,13 +20,21 @@ PowerShell 仍适合服务、注册表、计划任务、BITS 和缓存目录操�
 
 | Tab | 典型功能 | 执行保护 |
 | --- | --- | --- |
-| 安全 | 临时文件、浏览器/GPU 缓存、诊断缓存、崩溃转储、旧 Codex runtime、只读诊断、临时关闭 Widgets | 默认预览；执行前确认；固定路径白名单 |
-| 中等风险 | Windows Update 缓存、Delivery Optimization、历史隔离目录、一次性性能优化、PerformanceGuard、Win+R 历史修复、当前用户 Widgets 设置 | 单项选择；影响提示；管理员功能触发 UAC |
-| 高风险 | 回收站、NetLimiter 历史、Visual Studio Packages、禁用 Windows Update、WindowsUpdateGuard、机器级 Widgets、历史激进组合 | 必须先预览；输入“执行”；需要时触发 UAC |
+| 安全 | C 盘深度分析、全部 Chrome/Edge 配置基础缓存、VS Code/npm/剪映/WPS 缓存、临时文件、旧 Codex runtime | 后台 BelowNormal、可取消；默认预览；精确叶目录白名单 |
+| 中等风险 | Service Worker、Qoder 索引、NuGet/Playwright/企业微信缓存、NuGet 分阶段迁移、Windows Update、守护任务 | 运行中应用阻止；单项确认；迁移复制/校验/切换/删源/回滚分离 |
+| 高风险 | Downloads 逐文件审查、Docker/WSL/Visual Studio 官方迁移向导、回收站、NetLimiter、系统策略 | 文件默认不选；输入“执行”；状态变化跳过；不使用目录联接 |
 
 功能说明由 [features.json](./src/CPanCleaner.Gui/Resources/features.json) 驱动，Tab、分组和详情不是写死在 XAML 中。新增功能时应同时更新功能目录、PowerShell allowlist 和静态测试。
 
 执行结果表格支持右键“打开选中条目所在文件夹”。目录目标会直接打开，文件目标会在 Explorer 中定位并选中；不存在的路径以及注册表、计划任务、诊断详情等非文件系统内容不会启用该菜单。
+
+## 2.4 空间分析、清理和迁移
+
+- `AnalyzeStorage` 优先使用 `diskusage.exe /c` 获取 `SizeOnDiskBytes`，跳过重解析点；不可用时使用有数量上限的 .NET 扫描。结果同时提供 `ReclaimableBytes`、建议、阻塞进程和迁移支持状态。
+- Chrome/Edge 会发现 `Default`、`Profile N`、`Guest Profile`、`System Profile`，普通缓存与 Service Worker 离线缓存分开分级；书签、Cookie、密码、扩展、IndexedDB 和 Local Storage 均不在目标内。
+- Chrome、Qoder、剪映、企业微信、VS Code、WPS、dotnet 等对应进程运行时，真实清理会返回 `BlockedByProcess`，程序从不自动结束这些进程。
+- Downloads 只列出根目录的 EXE/MSI/ZIP/CRDOWNLOAD，默认不选；永久删除前重新校验路径、大小和修改时间并记录 SHA256。
+- 自动迁移第一版只支持 [NuGet 全局包](https://learn.microsoft.com/nuget/consume-packages/managing-the-global-packages-and-cache-folders)。Prepare 复制、校验和切换但保留源；RemoveSource 需要单独确认；Rollback 使用 `%LOCALAPPDATA%\CPanCleaner\migrations` 中的清单。[Docker](https://docs.docker.com/desktop/settings-and-maintenance/settings/)、[WSL](https://learn.microsoft.com/windows/wsl/faq) 和 [Visual Studio](https://learn.microsoft.com/visualstudio/install/change-installation-locations?view=visualstudio) 只提供检测与官方入口。
 
 ## 计划任务管理
 
@@ -99,6 +107,9 @@ dotnet build .\CPanCleaner.sln -c Release --no-restore
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Scan -Include Default -Json
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action AnalyzeStorage -AnalysisScope All -Json
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action ReviewDownloads -DryRun -Json
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Migrate -MigrationTarget NuGetPackages -MigrationOperation Prepare -DestinationPath D:\NuGetPackages -DryRun -Json
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include WindowsUpdate,DeliveryOptimization -DryRun -Json
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action DisableWindowsUpdate -DryRun -Json
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action OptimizePerformance -DryRun -Json
@@ -118,6 +129,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Close-WindowsW
 - 显式保护系统根、System32、SysWOW64、WinSxS、servicing、Program Files、Defender 数据和用户内容目录。
 - `NetLimiterStats` 只允许删除精确的 `nlstats.db`。
 - `VisualStudioPackageCache` 必须精确 Include，永远不由 `Default`、`All` 或激进组合间接选择。
+- Downloads 只能删除用户明确勾选、位于根目录且身份未变化的允许扩展文件。
+- NuGet 迁移拒绝 C 盘、非本地固定盘、非 NTFS、非空目录和重解析点；准备阶段不删除源。
 - Windows Update 禁用、持久性能策略和机器级 Widgets 都先返回计划变更，真实执行需要管理员权限。
 
 详见 [安全说明](./docs/SAFETY.md) 和 [GUI 架构](./docs/GUI_ARCHITECTURE.md)。

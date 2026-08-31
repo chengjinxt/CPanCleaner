@@ -2,7 +2,7 @@
 
 ## 执行模型
 
-CPanCleaner 2.0 的 GUI 和命令行后端共用同一套规则：
+CPanCleaner 2.4 的 GUI 和命令行后端共用同一套规则：
 
 1. 扫描和 dry-run 不删除文件、不写策略。
 2. 真实变更必须显式进入 apply。
@@ -24,6 +24,7 @@ CPanCleaner 2.0 的 GUI 和命令行后端共用同一套规则：
 - 仅匹配 `codex-primary-runtime.previous-*` 的旧 Codex runtime。
 - Git/Conda/TortoiseGit 只读诊断。
 - 仅结束当前 Widgets 进程。
+- 全部合法 Chrome/Edge 配置中的基础缓存；VS Code 下载缓存、npm、剪映和 WPS 明确缓存。
 
 部分低风险系统目录仍需要管理员权限。非管理员状态下后端报告 `NeedsAdministrator`，不会绕过权限。
 
@@ -36,6 +37,8 @@ CPanCleaner 2.0 的 GUI 和命令行后端共用同一套规则：
 - 历史 CPanCleaner 隔离目录。
 - 一次性性能优化。
 - 当前用户 Widgets 隐藏设置。
+- 浏览器 Service Worker 离线缓存、Qoder `SharedClientCache\index/cache`、NuGet、Playwright 和企业微信升级包/日志。
+- NuGet 分阶段迁移、删除原缓存和回滚。
 
 Windows Update 缓存只处理 `SoftwareDistribution\Download`、升级暂存和明确的 Delivery Optimization Cache。它不删除 `SoftwareDistribution\DataStore`、BITS 队列数据库、WinSxS、servicing 元数据或更新日志。
 
@@ -50,6 +53,8 @@ Windows Update 缓存只处理 `SoftwareDistribution\Download`、升级暂存和
 - 禁用 Windows Update 自动下载。
 - 写入 Git/TortoiseGit 持久设置；PerformanceGuard 由独立界面功能按用户设置的周期管理。
 - 写入机器级 Widgets 策略。
+- Downloads 根目录允许扩展文件的逐项永久删除。
+- Docker、WSL、Visual Studio 迁移仅提供只读检测和官方入口，不直接移动数据。
 
 高风险功能不属于 `Default`。`VisualStudioPackageCache` 也不属于 `All`，只能通过完全匹配的 Include 选择；历史激进组合同样不包含它和回收站。
 
@@ -64,6 +69,15 @@ Windows Update 缓存只处理 `SoftwareDistribution\Download`、升级暂存和
 - 明确阻止 C 盘根、Windows 根、System32、SysWOW64、WinSxS、servicing、Program Files、Defender 数据。
 - 明确阻止用户 Profile 根以及 Desktop、Documents、Downloads、Pictures、Music、Videos。
 - 单项占用或访问失败只记录该项，不扩大删除范围。
+- 目标应用进程运行时真实清理返回 `BlockedByProcess`；不会自动结束 Chrome、Qoder、剪映、企业微信、VS Code、WPS 或 dotnet。
+
+### Downloads 逐文件删除
+
+只列出 Downloads 根目录中的 `.exe`、`.msi`、`.zip` 和 `.crdownload`。所有行默认未选；执行前要求高风险文字确认，并重新核对直接父目录、扩展名、大小和 UTC 修改时间。文件变化、重解析点、子目录或其它扩展名一律跳过；成功删除会记录执行前 SHA256。
+
+### NuGet 迁移
+
+迁移目标必须是非 C 盘、本地固定磁盘、NTFS、空目录且不是重解析点。Prepare 先在同分区唯一暂存目录中使用 `robocopy /XJ`，核对文件数量、逻辑大小和 `.nupkg.sha512` 后原子提交为最终目标，随后才设置用户级 `NUGET_PACKAGES`，并通过新 `dotnet` 进程验证；源缓存仍保留。RemoveSource 与 Rollback 是独立功能，均重新检查状态和阻塞进程。Docker、WSL、Visual Studio、Qoder、Codex、剪映和企业微信不使用目录联接自动迁移。
 
 ## 特殊高风险目标
 
@@ -93,7 +107,7 @@ Windows Update 缓存只处理 `SoftwareDistribution\Download`、升级暂存和
 
 - 功能目录只决定界面展示和传给后端的固定参数，不执行任意命令文本。
 - C# 使用 `ProcessStartInfo.ArgumentList` 传参，避免拼接用户输入形成 PowerShell 命令。
-- 可变输入目前只有 0–3650 的保留天数。
+- 可变输入包括 0–3650 的保留天数、5–1440 分钟任务周期、经过严格验证的 NuGet 目标空目录，以及后端生成的 Downloads 身份令牌。
 - 普通执行直接捕获 JSON；管理员执行使用 UAC 隔离进程，通过一次性随机文件名 JSON 回传结果并在读取后删除。
 - 取消只能终止仍在运行的进程，已经完成的系统操作不会自动回滚。
 

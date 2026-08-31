@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.4.0 - 2026-08-30
+
+- Added cancellable, BelowNormal-priority `AnalyzeStorage` with `diskusage.exe /c`, bounded .NET fallback, localized CSV parsing, and structured size/recommendation/blocker/migration fields.
+- Expanded Chrome and Edge basic-cache cleanup to every valid profile while separating Service Worker offline caches as medium risk.
+- Added exact cache targets for VS Code, npm, Jianying, WPS, Qoder, NuGet, Playwright, and WXWork; matching running processes now block apply without being terminated.
+- Added high-risk Downloads direct-file review with default-unchecked GUI selection, extension/path/size/time identity validation, signatures, and SHA256 logging.
+- Added transactional NuGet global-package migration with NTFS/fixed-drive/space checks, verified copy, user-level path switching, separate source removal, stable rollback state, and rollback support.
+- Added read-only Docker, WSL, and Visual Studio capacity/migration guidance using official settings or management entry points; no junction-based migration is used.
+- Fixed Windows PowerShell 5.1 localized source decoding by storing the backend module and localized test script as UTF-8 with BOM.
+- Added reparse-point, browser whitelist, Qoder boundary, Downloads identity, migration destination, localized CSV, process priority, catalog, and compatibility tests.
+
 ## 2.3.0 - 2026-08-30
 
 - Added an execution-result context menu for opening the selected item's filesystem location.

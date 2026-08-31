@@ -17,6 +17,14 @@ public sealed class CleanerFeature
     public string Action { get; set; } = "Clean";
     public string[] Includes { get; set; } = Array.Empty<string>();
     public string[] AffectedPaths { get; set; } = Array.Empty<string>();
+    public string AnalysisScope { get; set; } = "Profile";
+    public string MigrationTarget { get; set; } = "NuGetPackages";
+    public string MigrationOperation { get; set; } = "Preview";
+    public bool RequiresDestination { get; set; }
+    public string DestinationLabel { get; set; } = "迁移目标空目录";
+    public bool SelectableResults { get; set; }
+    public string GuidanceUrl { get; set; } = string.Empty;
+    public string GuidanceExecutable { get; set; } = string.Empty;
     public bool RequiresAdministrator { get; set; }
     public bool SupportsApply { get; set; } = true;
     public bool RestartExplorer { get; set; }

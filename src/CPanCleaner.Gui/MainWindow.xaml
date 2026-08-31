@@ -206,6 +206,11 @@
                                     <TextBox x:Name="GuardIntervalMinutesBox" Text="15" Width="58" Margin="8,0,5,0" HorizontalContentAlignment="Center" />
                                     <TextBlock Text="分钟（5–1440）" VerticalAlignment="Center" Foreground="#475467" />
                                 </StackPanel>
+                                <StackPanel x:Name="DestinationPanel" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
+                                    <TextBlock Text="{Binding SelectedFeature.DestinationLabel}" VerticalAlignment="Center" Foreground="#475467" />
+                                    <TextBox x:Name="DestinationPathBox" Width="270" Margin="8,0,6,0" />
+                                    <Button Content="浏览…" Style="{StaticResource SecondaryButtonStyle}" Padding="10,4" Click="BrowseDestinationButton_OnClick" />
+                                </StackPanel>
                                 <StackPanel Grid.Column="2" Orientation="Horizontal">
                                     <Button x:Name="PreviewButton" Content="{Binding SelectedFeature.PreviewLabel}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,8,0" Click="PreviewButton_OnClick" />
                                     <Button x:Name="DisableGuardButton" Content="关闭并移除任务" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,8,0" Visibility="Collapsed" Click="DisableGuardButton_OnClick" />
@@ -232,7 +237,7 @@
                                 <TextBlock Text="{Binding StatusText}" FontSize="11" Foreground="#667085" Margin="0,2,0,0" />
                             </StackPanel>
                         </DockPanel>
-                        <DataGrid x:Name="ResultGrid" Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="True"
+                        <DataGrid x:Name="ResultGrid" Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="False"
                                   CanUserAddRows="False" HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                                   BorderThickness="0" RowHeaderWidth="0" Background="White"
                                   PreviewMouseRightButtonDown="ResultGrid_OnPreviewMouseRightButtonDown">
@@ -244,12 +249,14 @@
                                 </ContextMenu>
                             </DataGrid.ContextMenu>
                             <DataGrid.Columns>
-                                <DataGridTextColumn Header="类型" Binding="{Binding Type}" Width="90" />
-                                <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="170" />
-                                <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="110" />
-                                <DataGridTextColumn Header="估算 MB" Binding="{Binding EstimatedMB}" Width="80" />
-                                <DataGridTextColumn Header="路径 / 详情" Binding="{Binding Path}" Width="*" />
-                                <DataGridTextColumn Header="说明" Binding="{Binding Message}" Width="220" />
+                                <DataGridCheckBoxColumn Header="选择" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="50" />
+                                <DataGridTextColumn Header="类型" Binding="{Binding Type}" Width="85" IsReadOnly="True" />
+                                <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="170" IsReadOnly="True" />
+                                <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="125" IsReadOnly="True" />
+                                <DataGridTextColumn Header="实际占用" Binding="{Binding DisplaySize}" Width="90" IsReadOnly="True" />
+                                <DataGridTextColumn Header="阻塞进程" Binding="{Binding ProcessBlockers}" Width="140" IsReadOnly="True" />
+                                <DataGridTextColumn Header="路径 / 详情" Binding="{Binding Path}" Width="*" IsReadOnly="True" />
+                                <DataGridTextColumn Header="建议 / 说明" Binding="{Binding DetailText}" Width="260" IsReadOnly="True" />
                             </DataGrid.Columns>
                         </DataGrid>
                     </Grid>

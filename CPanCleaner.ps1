@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Scan', 'Clean', 'Diagnose', 'DisableWindowsUpdate', 'OptimizePerformance', 'PreventPerformanceSpikes', 'ManageGuard', 'RepairRunHistory', 'CloseWidgets')]
+    [ValidateSet('Scan', 'Clean', 'AnalyzeStorage', 'ReviewDownloads', 'Migrate', 'Diagnose', 'DisableWindowsUpdate', 'OptimizePerformance', 'PreventPerformanceSpikes', 'ManageGuard', 'RepairRunHistory', 'CloseWidgets')]
     [string] $Action = 'Scan',
 
     [string[]] $Include = @('Default'),
@@ -14,6 +14,14 @@ param(
     [int] $MinimumAgeHours = -1,
     [ValidateRange(1000, 1000000)]
     [int] $MaxScanItems = 100000,
+    [ValidateSet('Profile', 'Applications', 'All')]
+    [string] $AnalysisScope = 'Profile',
+    [ValidateSet('NuGetPackages')]
+    [string] $MigrationTarget = 'NuGetPackages',
+    [ValidateSet('Preview', 'Prepare', 'RemoveSource', 'Rollback')]
+    [string] $MigrationOperation = 'Preview',
+    [string] $DestinationPath,
+    [string[]] $SelectedItemTokens = @(),
     [string] $LogDirectory,
     [string] $CsvPath,
     [string] $RepositoryPath = (Get-Location).Path,
@@ -53,6 +61,18 @@ if ($Elevate -and -not (Test-CPanAdministrator)) {
     $arguments += @('-MinimumAgeDays', $MinimumAgeDays)
     $arguments += @('-MinimumAgeHours', $MinimumAgeHours)
     $arguments += @('-MaxScanItems', $MaxScanItems)
+    $arguments += @('-AnalysisScope', $AnalysisScope)
+    $arguments += @('-MigrationTarget', $MigrationTarget)
+    $arguments += @('-MigrationOperation', $MigrationOperation)
+
+    if ($DestinationPath) {
+        $arguments += @('-DestinationPath', ('"{0}"' -f $DestinationPath))
+    }
+
+    if ($SelectedItemTokens.Count -gt 0) {
+        $arguments += '-SelectedItemTokens'
+        foreach ($token in $SelectedItemTokens) { $arguments += $token }
+    }
 
     if ($LogDirectory) {
         $arguments += @('-LogDirectory', ('"{0}"' -f $LogDirectory))
@@ -98,6 +118,11 @@ $result = Invoke-CPanCleaner `
     -MinimumAgeDays $MinimumAgeDays `
     -MinimumAgeHours $MinimumAgeHours `
     -MaxScanItems $MaxScanItems `
+    -AnalysisScope $AnalysisScope `
+    -MigrationTarget $MigrationTarget `
+    -MigrationOperation $MigrationOperation `
+    -DestinationPath $DestinationPath `
+    -SelectedItemTokens $SelectedItemTokens `
     -LogDirectory $LogDirectory `
     -CsvPath $CsvPath `
     -RepositoryPath $RepositoryPath `
