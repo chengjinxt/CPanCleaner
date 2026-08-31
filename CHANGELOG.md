@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.1 - 2026-08-31
+
+- Added readable, wrapping hover tooltips to every text cell in the execution-result grid, with ellipsis, resizable columns, and horizontal scrolling for smaller windows.
+- Localized VS Code cache and failed-extension staging descriptions, and clarified that dry-run preview does not delete anything.
+
 ## 2.4.0 - 2026-08-30
 
 - Added cancellable, BelowNormal-priority `AnalyzeStorage` with `diskusage.exe /c`, bounded .NET fallback, localized CSV parsing, and structured size/recommendation/blocker/migration fields.

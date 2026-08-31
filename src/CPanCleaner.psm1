@@ -1,6 +1,6 @@
 ﻿Set-StrictMode -Version 2.0
 
-$script:CleanerVersion = '2.4.0'
+$script:CleanerVersion = '2.4.1'
 
 function Get-CPanSystemDrive {
     $drive = $env:SystemDrive
@@ -313,8 +313,8 @@ function Get-CPanApplicationCacheTargets {
     }
     if ($env:APPDATA) {
         $definitions += @(
-            [pscustomobject]@{ Id='VSCodeVsixCache'; Name='VS Code downloaded VSIX cache'; Root=$env:APPDATA; Relative='Code\CachedExtensionVSIXs'; Category='VSCodeCache'; Risk='Low'; Processes=@('Code'); Recommendation='关闭 VS Code 后清理；已安装扩展不会被删除。' },
-            [pscustomobject]@{ Id='VSCodeCrashReports'; Name='VS Code crash reports'; Root=$env:APPDATA; Relative='Code\Crashpad\reports'; Category='VSCodeCache'; Risk='Low'; Processes=@('Code'); Recommendation='删除崩溃报告，不影响设置和扩展。' },
+            [pscustomobject]@{ Id='VSCodeVsixCache'; Name='VS Code 已下载的 VSIX 缓存'; Root=$env:APPDATA; Relative='Code\CachedExtensionVSIXs'; Category='VSCodeCache'; Risk='Low'; Processes=@('Code'); Recommendation='关闭 VS Code 后清理；已安装扩展不会被删除，后续安装扩展时可能重新下载。' },
+            [pscustomobject]@{ Id='VSCodeCrashReports'; Name='VS Code 崩溃报告'; Root=$env:APPDATA; Relative='Code\Crashpad\reports'; Category='VSCodeCache'; Risk='Low'; Processes=@('Code'); Recommendation='仅删除历史崩溃报告，不影响设置和扩展；删除后将无法再用这些报告排查旧崩溃。' },
             [pscustomobject]@{ Id='QoderIndex'; Name='Qoder local search index'; Root=$env:APPDATA; Relative='Qoder\SharedClientCache\index'; Category='QoderCache'; Risk='Medium'; Processes=@('Qoder'); Recommendation='会触发重新索引并暂时增加 CPU/磁盘占用，必须单独确认。' },
             [pscustomobject]@{ Id='QoderSharedCache'; Name='Qoder shared client cache'; Root=$env:APPDATA; Relative='Qoder\SharedClientCache\cache'; Category='QoderCache'; Risk='Medium'; Processes=@('Qoder'); Recommendation='关闭 Qoder 后单独确认；不触碰设置、聊天和历史数据。' },
             [pscustomobject]@{ Id='WpsDownloadCache'; Name='WPS download cache'; Root=$env:APPDATA; Relative='kingsoft\wps_download'; Category='WpsCache'; Risk='Low'; Processes=@('wps','wpp','et','wpspdf'); Recommendation='关闭 WPS 后清理；addons 和文档不在目标内。' },
@@ -351,10 +351,10 @@ function Get-CPanApplicationCacheTargets {
                 ($_.Name -match '^\.[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' -or $_.Name -match '\.vsctmp$')
             }) {
                 $targets += New-CPanTarget -Id ('VSCodeExtensionTemp:' + ($temporaryExtension.Name -replace '[^A-Za-z0-9]+','')) `
-                    -Name ('VS Code failed extension install: ' + $temporaryExtension.Name) -Path $temporaryExtension.FullName -Kind 'DirectorySelf' `
+                    -Name ('VS Code 失败的扩展安装暂存：' + $temporaryExtension.Name) -Path $temporaryExtension.FullName -Kind 'DirectorySelf' `
                     -Risk 'Low' -Category 'VSCodeCache' -Default $false -RequiresAdmin $false -UseAgeFilter $false -ProcessNames @('Code') `
-                    -Recommendation 'Close VS Code first. Only UUID staging directories and *.vsctmp are targeted; installed extensions and .obsolete are preserved.' `
-                    -Description 'Exact failed-extension-install staging directory pattern.'
+                    -Recommendation '请先关闭 VS Code。仅清理名称符合 UUID 暂存格式或以 *.vsctmp 结尾的失败安装目录；已安装扩展和 .obsolete 元数据会保留。' `
+                    -Description '严格匹配失败扩展安装产生的暂存目录，不扫描或删除其他扩展目录。'
             }
         }
     }
@@ -1345,7 +1345,7 @@ function Invoke-CPanNuGetMigration {
             }
             throw
         }
-        $manifest = [pscustomobject]@{ Version='2.4.0'; Source=$source; Destination=$validated.Path; PreviousUserValue=$previousUserValue; SourceBytes=$verification.SourceBytes; SourceCount=$verification.SourceCount; CopyVerified=$true; SourceRemoved=$false; PreparedAt=(Get-Date).ToString('o') }
+        $manifest = [pscustomobject]@{ Version='2.4.1'; Source=$source; Destination=$validated.Path; PreviousUserValue=$previousUserValue; SourceBytes=$verification.SourceBytes; SourceCount=$verification.SourceCount; CopyVerified=$true; SourceRemoved=$false; PreparedAt=(Get-Date).ToString('o') }
         $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8
         try {
             [Environment]::SetEnvironmentVariable('NUGET_PACKAGES',$validated.Path,'User')
@@ -3087,7 +3087,7 @@ function Invoke-CPanCleanTarget {
             ItemCount = $measurement.ItemCount
             RemovedCount = $removedCount
             Path = $Target.Path
-            Message = 'Dry-run only. Pass -Apply to remove candidates.'
+            Message = '当前仅为预览，尚未删除任何内容；点击实际清理并确认后才会删除候选项。'
             Recommendation = $Target.Recommendation
             ProcessBlockers = ($blockers -join '; ')
             MigrationSupport = $Target.MigrationSupport

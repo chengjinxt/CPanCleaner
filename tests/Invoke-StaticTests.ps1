@@ -63,7 +63,7 @@ Assert-True -Condition ($performancePreventPreview.Items.Count -eq 0) -Message '
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'GuardControl' -and $_.Name -eq '\CPanCleaner\PerformanceGuard' }).Count -eq 1) -Message 'PreventPerformanceSpikes should explain that PerformanceGuard is managed separately.'
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq 'TGitCacheCheckContentMaxSize' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan TortoiseGit content hashing reduction.'
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq 'core.fsmonitor' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan global Git fsmonitor hardening.'
-Assert-True -Condition ($performancePreventPreview.Version -eq '2.4.0') -Message 'Storage-analysis release should report version 2.4.0.'
+Assert-True -Condition ($performancePreventPreview.Version -eq '2.4.1') -Message 'Result-tooltip release should report version 2.4.1.'
 
 $guardStatus = Invoke-CPanCleaner -Action ManageGuard -GuardName PerformanceGuard -GuardOperation Status -Quiet
 Assert-True -Condition ($guardStatus.Mode -eq 'ReadOnly') -Message 'Guard status must be read-only.'
@@ -139,6 +139,11 @@ Assert-True -Condition ($mainWindowSource -match 'Directory\.Exists\(fullPath\)'
 Assert-True -Condition ($mainWindowSource -match 'File\.Exists\(fullPath\)') -Message 'Open-location should verify files exist.'
 Assert-True -Condition ($mainWindowSource -match 'ArgumentList\.Add\("/select,"\)') -Message 'Open-location should select an exact file when the result points to a file.'
 Assert-True -Condition ($mainWindowXaml -match 'DataGridCheckBoxColumn Header="选择"') -Message 'Downloads review should expose per-file selection checkboxes.'
+$resultTooltipColumnCount = [regex]::Matches($mainWindowXaml, '<DataGridTextColumn[^>]+ElementStyle="\{StaticResource ResultCellTextStyle\}"').Count
+Assert-True -Condition ($resultTooltipColumnCount -eq 7) -Message 'Every text column in the result grid should expose its complete cell text through the shared tooltip style.'
+Assert-True -Condition ($mainWindowXaml -match 'Text="\{Binding\}" TextWrapping="Wrap" MaxWidth="680"') -Message 'Long result tooltips should wrap within a bounded readable width.'
+Assert-True -Condition ($mainWindowXaml -match 'ToolTipService\.ShowDuration" Value="60000"') -Message 'Result tooltips should remain visible long enough to read complete details.'
+Assert-True -Condition ($mainWindowXaml -match 'ScrollViewer\.HorizontalScrollBarVisibility="Auto"') -Message 'The result grid should retain horizontal access when minimum column widths exceed the viewport.'
 
 $browserTargets = @(Get-CPanCleanerTarget -Include BrowserCache)
 foreach ($target in $browserTargets) {
@@ -173,6 +178,8 @@ Assert-True -Condition (@(Get-CPanProcessBlockers -ProcessNames @('powershell'))
 $vsCodeTargets = @(Get-CPanCleanerTarget -Include VSCodeCache)
 Assert-False -Condition (@($vsCodeTargets | Where-Object { $_.Path -match '\\extensions\\' -and $_.Path -notmatch '(\\\.[0-9a-fA-F-]{36}$|\.vsctmp$)' }).Count -gt 0) -Message 'VS Code extension cleanup must only include UUID staging or .vsctmp directories.'
 Assert-False -Condition (@($vsCodeTargets | Where-Object { $_.Path -match '\\extensions\\.*\\|\\extensions\\\.obsolete$' }).Count -gt 0) -Message 'VS Code cleanup must not include current extension directories or .obsolete metadata.'
+Assert-False -Condition ($moduleSource -match 'Close VS Code first|Dry-run only\. Pass -Apply') -Message 'VS Code and dry-run guidance shown in the Chinese GUI should not fall back to unexplained English text.'
+Assert-True -Condition ($moduleSource -match '当前仅为预览，尚未删除任何内容') -Message 'Dry-run results should explicitly explain that preview has not deleted anything.'
 
 $localizedCsv = @(ConvertFrom-CPanDiskUsageCsv -Lines @('SizeOnDisk,FileSize,Files,目录路径','4096,2048,3,C:\临时目录'))
 Assert-True -Condition ($localizedCsv.Count -eq 1 -and $localizedCsv[0].SizeOnDiskBytes -eq 4096 -and $localizedCsv[0].Path -eq 'C:\临时目录') -Message 'diskusage CSV parsing must ignore localized headers and preserve localized paths.'
