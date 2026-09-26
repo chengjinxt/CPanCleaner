@@ -1,6 +1,6 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
-    [ValidateSet('Scan', 'Clean', 'AnalyzeStorage', 'ReviewDownloads', 'Migrate', 'Diagnose', 'DisableWindowsUpdate', 'OptimizePerformance', 'PreventPerformanceSpikes', 'ManageGuard', 'RepairRunHistory', 'CloseWidgets')]
+    [ValidateSet('Scan', 'Clean', 'AnalyzeStorage', 'ReviewDownloads', 'Migrate', 'Diagnose', 'DisableWindowsUpdate', 'RestoreWindowsUpdate', 'OptimizePerformance', 'PreventPerformanceSpikes', 'ManageGuard', 'RepairRunHistory', 'CloseWidgets')]
     [string] $Action = 'Scan',
 
     [string[]] $Include = @('Default'),

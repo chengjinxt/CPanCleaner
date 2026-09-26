@@ -1579,16 +1579,13 @@ function Add-Result {
     param([string]`$Type,[string]`$Name,[string]`$Status,[string]`$Detail='')
     `$script:results += [pscustomobject]@{ Time = (Get-Date).ToString('s'); Type = `$Type; Name = `$Name; Status = `$Status; Detail = `$Detail }
 }
-foreach (`$svc in @('wuauserv','UsoSvc','DoSvc','WaaSMedicSvc')) {
+foreach (`$svc in @('wuauserv','WaaSMedicSvc')) {
     try {
-        reg.exe add "HKLM\SYSTEM\CurrentControlSet\Services\`$svc" /v Start /t REG_DWORD /d 4 /f | Out-Null
-        if (`$svc -eq 'UsoSvc' -or `$svc -eq 'DoSvc') {
-            reg.exe add "HKLM\SYSTEM\CurrentControlSet\Services\`$svc" /v DelayedAutoStart /t REG_DWORD /d 0 /f | Out-Null
-        }
-        Add-Result -Type 'ServiceRegistry' -Name `$svc -Status 'Start=4'
+        reg.exe add "HKLM\SYSTEM\CurrentControlSet\Services\`$svc" /v Start /t REG_DWORD /d 3 /f | Out-Null
+        Add-Result -Type 'ServiceRegistry' -Name `$svc -Status 'Start=3'
     } catch { Add-Result -Type 'ServiceRegistry' -Name `$svc -Status 'Failed' -Detail `$_.Exception.Message }
 }
-foreach (`$svc in @('wuauserv','UsoSvc','DoSvc','WaaSMedicSvc')) {
+foreach (`$svc in @('wuauserv','WaaSMedicSvc')) {
     try {
         `$out = & sc.exe stop `$svc 2>&1 | Out-String
         Add-Result -Type 'ServiceStop' -Name `$svc -Status 'Requested' -Detail `$out.Trim()
@@ -1608,11 +1605,7 @@ try {
     @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='Schedule Wake To Work'},
     @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='Schedule Work'},
     @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='Start Oobe Expedite Work'},
-    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='StartOobeAppsScan'},
-    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='StartOobeAppsScan_LicenseAccepted'},
-    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='StartOobeAppsScanAfterUpdate'},
     @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='UIEOrchestrator'},
-    @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='USO_UxBroker'},
     @{Path='\Microsoft\Windows\UpdateOrchestrator\'; Name='UUS Failover Task'},
     @{Path='\Microsoft\Windows\WaaSMedic\'; Name='DeferredWork'},
     @{Path='\Microsoft\Windows\WaaSMedic\'; Name='MaintenanceWork'},
@@ -1625,7 +1618,7 @@ foreach (`$task in `$tasks) {
         Add-Result -Type 'ScheduledTask' -Name `$full -Status ("SchtasksExit=`$LASTEXITCODE") -Detail `$out.Trim()
     } catch { Add-Result -Type 'ScheduledTask' -Name `$full -Status 'SchtasksFailed' -Detail `$_.Exception.Message }
 }
-foreach (`$svc in @('wuauserv','UsoSvc','DoSvc','WaaSMedicSvc','bits')) {
+foreach (`$svc in @('wuauserv','WaaSMedicSvc','DoSvc','bits')) {
     try {
         `$s = Get-Service -Name `$svc -ErrorAction Stop
         Add-Result -Type 'ServiceFinal' -Name `$svc -Status `$s.Status.ToString() -Detail ('StartType=' + `$s.StartType.ToString())
@@ -1699,19 +1692,12 @@ function Install-CPanWindowsUpdateGuardTask {
         Unregister-ScheduledTask -TaskPath $taskPath -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 
         $registryPlans = @(
-            [pscustomobject]@{ Path = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DisableWindowsUpdateAccess'; Value = 1 },
-            [pscustomobject]@{ Path = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'SetDisableUXWUAccess'; Value = 1 },
-            [pscustomobject]@{ Path = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DoNotConnectToWindowsUpdateInternetLocations'; Value = 1 },
             [pscustomobject]@{ Path = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'ExcludeWUDriversInQualityUpdate'; Value = 1 },
             [pscustomobject]@{ Path = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'NoAutoUpdate'; Value = 1 },
             [pscustomobject]@{ Path = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'AUOptions'; Value = 2 },
             [pscustomobject]@{ Path = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization'; Name = 'DODownloadMode'; Value = 0 },
-            [pscustomobject]@{ Path = 'HKLM\SYSTEM\CurrentControlSet\Services\wuauserv'; Name = 'Start'; Value = 4 },
-            [pscustomobject]@{ Path = 'HKLM\SYSTEM\CurrentControlSet\Services\UsoSvc'; Name = 'Start'; Value = 4 },
-            [pscustomobject]@{ Path = 'HKLM\SYSTEM\CurrentControlSet\Services\UsoSvc'; Name = 'DelayedAutoStart'; Value = 0 },
-            [pscustomobject]@{ Path = 'HKLM\SYSTEM\CurrentControlSet\Services\DoSvc'; Name = 'Start'; Value = 4 },
-            [pscustomobject]@{ Path = 'HKLM\SYSTEM\CurrentControlSet\Services\DoSvc'; Name = 'DelayedAutoStart'; Value = 0 },
-            [pscustomobject]@{ Path = 'HKLM\SYSTEM\CurrentControlSet\Services\WaaSMedicSvc'; Name = 'Start'; Value = 4 }
+            [pscustomobject]@{ Path = 'HKLM\SYSTEM\CurrentControlSet\Services\wuauserv'; Name = 'Start'; Value = 3 },
+            [pscustomobject]@{ Path = 'HKLM\SYSTEM\CurrentControlSet\Services\WaaSMedicSvc'; Name = 'Start'; Value = 3 }
         )
 
         $actions = foreach ($plan in $registryPlans) {
@@ -2772,19 +2758,14 @@ function Invoke-CPanDisableWindowsUpdateDownloads {
     }
 
     $policyPlans = @(
-        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DisableWindowsUpdateAccess'; Value = 1 },
-        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'SetDisableUXWUAccess'; Value = 1 },
-        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DoNotConnectToWindowsUpdateInternetLocations'; Value = 1 },
         [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'ExcludeWUDriversInQualityUpdate'; Value = 1 },
         [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'NoAutoUpdate'; Value = 1 },
         [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'AUOptions'; Value = 2 },
         [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization'; Name = 'DODownloadMode'; Value = 0 }
     )
     $servicePlans = @(
-        [pscustomobject]@{ Name = 'UsoSvc'; Start = 'disabled'; Stop = $true },
-        [pscustomobject]@{ Name = 'wuauserv'; Start = 'disabled'; Stop = $true },
-        [pscustomobject]@{ Name = 'DoSvc'; Start = 'disabled'; Stop = $true },
-        [pscustomobject]@{ Name = 'WaaSMedicSvc'; Start = 'disabled'; Stop = $true },
+        [pscustomobject]@{ Name = 'wuauserv'; Start = 'demand'; Stop = $true },
+        [pscustomobject]@{ Name = 'WaaSMedicSvc'; Start = 'demand'; Stop = $true },
         [pscustomobject]@{ Name = 'bits'; Start = '<unchanged>'; Stop = $false }
     )
     $taskPlans = @(
@@ -2797,11 +2778,7 @@ function Invoke-CPanDisableWindowsUpdateDownloads {
         [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'Schedule Wake To Work' },
         [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'Schedule Work' },
         [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'Start Oobe Expedite Work' },
-        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'StartOobeAppsScan' },
-        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'StartOobeAppsScan_LicenseAccepted' },
-        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'StartOobeAppsScanAfterUpdate' },
         [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'UIEOrchestrator' },
-        [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'USO_UxBroker' },
         [pscustomobject]@{ TaskPath = '\Microsoft\Windows\UpdateOrchestrator\'; TaskName = 'UUS Failover Task' },
         [pscustomobject]@{ TaskPath = '\Microsoft\Windows\WaaSMedic\'; TaskName = 'DeferredWork' },
         [pscustomobject]@{ TaskPath = '\Microsoft\Windows\WaaSMedic\'; TaskName = 'MaintenanceWork' },
@@ -2828,6 +2805,14 @@ function Invoke-CPanDisableWindowsUpdateDownloads {
         return $records
     }
 
+    $cleanupKeys = @('DisableWindowsUpdateAccess', 'DoNotConnectToWindowsUpdateInternetLocations', 'SetDisableUXWUAccess')
+    $wuPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    foreach ($k in $cleanupKeys) {
+        if (Test-Path -LiteralPath $wuPolicyPath) {
+            Remove-ItemProperty -LiteralPath $wuPolicyPath -Name $k -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     foreach ($plan in $policyPlans) {
         $records += Set-CPanRegistryDWord -Path $plan.Path -Name $plan.Name -Value $plan.Value -Context $Context
     }
@@ -2836,8 +2821,12 @@ function Invoke-CPanDisableWindowsUpdateDownloads {
         $records += Set-CPanServiceStartRegistry -ServiceName $plan.Name -Start 4 -Context $Context
     }
 
+    foreach ($plan in $servicePlans | Where-Object { $_.Start -eq 'demand' }) {
+        $records += Set-CPanServiceStartRegistry -ServiceName $plan.Name -Start 3 -Context $Context
+    }
+
     foreach ($plan in $servicePlans | Where-Object { $_.Start -ne '<unchanged>' }) {
-        $records += Invoke-CPanScCommand -Arguments @('config', $plan.Name, 'start=', $plan.Start) -Name $plan.Name -Message "Configured service $($plan.Name) start=$($plan.Start)." -Context $Context
+        $records += Invoke-CPanScCommand -Arguments @('config', $plan.Name, "start= $($plan.Start)") -Name $plan.Name -Message "Configured service $($plan.Name) start=$($plan.Start)." -Context $Context
     }
 
     foreach ($plan in $servicePlans | Where-Object { $_.Stop }) {
@@ -2851,6 +2840,128 @@ function Invoke-CPanDisableWindowsUpdateDownloads {
     }
 
     $records += Invoke-CPanSystemWindowsUpdateHardening -Context $Context
+    Start-Sleep -Seconds 2
+    foreach ($service in Get-CPanServiceControlSnapshot) {
+        $records += New-CPanDiagnosticRecord `
+            -Type 'WindowsUpdateVerification' `
+            -Severity 'Info' `
+            -Name $service.Name `
+            -Message 'Post-action service state.' `
+            -Detail ("Status={0}; StartType={1}; DisplayName={2}" -f $service.Status, $service.StartType, $service.DisplayName)
+    }
+
+    return $records
+}
+
+function Invoke-CPanRestoreWindowsUpdate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject] $Context,
+        [switch] $Apply,
+        [bool] $IsAdmin
+    )
+
+    $records = @()
+
+    $policyRemovals = @(
+        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DisableWindowsUpdateAccess' },
+        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'SetDisableUXWUAccess' },
+        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DoNotConnectToWindowsUpdateInternetLocations' },
+        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'ExcludeWUDriversInQualityUpdate' },
+        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'NoAutoUpdate' },
+        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'AUOptions' },
+        [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization'; Name = 'DODownloadMode' }
+    )
+
+    $serviceRestores = @(
+        [pscustomobject]@{ Name = 'wuauserv'; Start = 'demand'; Delayed = $false; StartNow = $true; DisplayName = 'Windows Update' },
+        [pscustomobject]@{ Name = 'UsoSvc'; Start = 'delayed-auto'; Delayed = $true; StartNow = $true; DisplayName = 'Update Orchestrator Service' },
+        [pscustomobject]@{ Name = 'DoSvc'; Start = 'delayed-auto'; Delayed = $true; StartNow = $true; DisplayName = 'Delivery Optimization' },
+        [pscustomobject]@{ Name = 'WaaSMedicSvc'; Start = 'demand'; Delayed = $false; StartNow = $false; DisplayName = 'Windows Update Medic Service' }
+    )
+
+    $taskPaths = @(
+        '\Microsoft\Windows\UpdateOrchestrator\*',
+        '\Microsoft\Windows\WindowsUpdate\*',
+        '\Microsoft\Windows\WaaSMedic\*'
+    )
+
+    if (-not $Apply) {
+        foreach ($plan in $policyRemovals) {
+            $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name $plan.Name -Message 'Dry-run: blocking policy value would be removed.' -Detail "$($plan.Path)\$($plan.Name)"
+        }
+        foreach ($plan in $serviceRestores) {
+            $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name $plan.Name -Message 'Dry-run: service would be restored and started.' -Detail "Start=$($plan.Start); StartNow=$($plan.StartNow)"
+        }
+        $records += New-CPanDiagnosticRecord -Type 'PlannedChange' -Severity 'Info' -Name 'ScheduledTasks' -Message 'Dry-run: Windows Update and UpdateOrchestrator tasks would be enabled.' -Detail ($taskPaths -join ', ')
+        $records += New-CPanDiagnosticRecord -Type 'GuardControl' -Severity 'Info' -Name '\CPanCleaner\WindowsUpdateGuard' -Message 'Dry-run: WindowsUpdateGuard task would be disabled to prevent re-applying restrictions.' -Detail 'Guard will be unregistered if present.'
+        return $records
+    }
+
+    if (-not $IsAdmin) {
+        $records += New-CPanDiagnosticRecord -Type 'WindowsUpdateControl' -Severity 'Error' -Name 'Administrator' -Message 'Administrator rights are required to restore Windows Update and Microsoft Store dependencies.' -Detail 'Run again as Administrator, or use -Elevate.'
+        return $records
+    }
+
+    foreach ($plan in $policyRemovals) {
+        try {
+            if (Test-Path -LiteralPath $plan.Path) {
+                $prop = Get-ItemProperty -LiteralPath $plan.Path -Name $plan.Name -ErrorAction SilentlyContinue
+                if ($null -ne $prop) {
+                    Remove-ItemProperty -LiteralPath $plan.Path -Name $plan.Name -Force -ErrorAction Stop
+                    $records += New-CPanDiagnosticRecord -Type 'PolicyRemoval' -Severity 'Info' -Name $plan.Name -Message 'Removed blocking policy value.' -Detail "$($plan.Path)\$($plan.Name)"
+                }
+            }
+        } catch {
+            $records += New-CPanDiagnosticRecord -Type 'PolicyRemoval' -Severity 'Warning' -Name $plan.Name -Message 'Could not remove policy value.' -Detail $_.Exception.Message
+        }
+    }
+
+    try {
+        $guardTask = Get-ScheduledTask -TaskPath '\CPanCleaner\' -TaskName 'WindowsUpdateGuard' -ErrorAction SilentlyContinue
+        if ($guardTask) {
+            Unregister-ScheduledTask -TaskPath '\CPanCleaner\' -TaskName 'WindowsUpdateGuard' -Confirm:$false -ErrorAction Stop
+            $records += New-CPanDiagnosticRecord -Type 'GuardControl' -Severity 'Info' -Name '\CPanCleaner\WindowsUpdateGuard' -Message 'Unregistered WindowsUpdateGuard scheduled task.' -Detail 'Prevented guard from overriding restored settings.'
+        }
+    } catch {
+        $records += New-CPanDiagnosticRecord -Type 'GuardControl' -Severity 'Warning' -Name '\CPanCleaner\WindowsUpdateGuard' -Message 'Could not unregister WindowsUpdateGuard task.' -Detail $_.Exception.Message
+    }
+
+    foreach ($plan in $serviceRestores) {
+        try {
+            $scStart = if ($plan.Start -eq 'delayed-auto') { 'auto' } else { $plan.Start }
+            $records += Invoke-CPanScCommand -Arguments @('config', $plan.Name, "start= $scStart") -Name $plan.Name -Message "Configured service $($plan.Name) start=$scStart." -Context $Context
+
+            $serviceKeyPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($plan.Name)"
+            if ($plan.Delayed) {
+                Set-ItemProperty -Path $serviceKeyPath -Name 'DelayedAutoStart' -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+            } else {
+                Remove-ItemProperty -Path $serviceKeyPath -Name 'DelayedAutoStart' -Force -ErrorAction SilentlyContinue
+            }
+
+            if ($plan.StartNow) {
+                Start-Service -Name $plan.Name -ErrorAction SilentlyContinue
+            }
+        } catch {
+            $records += New-CPanDiagnosticRecord -Type 'ServiceRestore' -Severity 'Warning' -Name $plan.Name -Message "Could not configure service $($plan.Name)." -Detail $_.Exception.Message
+        }
+    }
+
+    foreach ($path in $taskPaths) {
+        try {
+            $tasks = Get-ScheduledTask -TaskPath $path -ErrorAction SilentlyContinue
+            foreach ($task in $tasks) {
+                if ($task.State -eq 'Disabled') {
+                    Enable-ScheduledTask -InputObject $task -ErrorAction SilentlyContinue | Out-Null
+                }
+            }
+            $records += New-CPanDiagnosticRecord -Type 'TaskRestore' -Severity 'Info' -Name $path -Message 'Enabled scheduled tasks.' -Detail "Restored tasks in $path"
+        } catch {
+            $records += New-CPanDiagnosticRecord -Type 'TaskRestore' -Severity 'Warning' -Name $path -Message "Could not enable tasks in $path." -Detail $_.Exception.Message
+        }
+    }
+
     Start-Sleep -Seconds 2
     foreach ($service in Get-CPanServiceControlSnapshot) {
         $records += New-CPanDiagnosticRecord `
@@ -3321,7 +3432,7 @@ function Get-CPanDiagnostics {
 function Invoke-CPanCleaner {
     [CmdletBinding()]
     param(
-        [ValidateSet('Scan', 'Clean', 'AnalyzeStorage', 'ReviewDownloads', 'Migrate', 'Diagnose', 'DisableWindowsUpdate', 'OptimizePerformance', 'PreventPerformanceSpikes', 'ManageGuard', 'RepairRunHistory')]
+        [ValidateSet('Scan', 'Clean', 'AnalyzeStorage', 'ReviewDownloads', 'Migrate', 'Diagnose', 'DisableWindowsUpdate', 'RestoreWindowsUpdate', 'OptimizePerformance', 'PreventPerformanceSpikes', 'ManageGuard', 'RepairRunHistory')]
         [string] $Action = 'Scan',
 
         [string[]] $Include = @('Default'),
@@ -3375,6 +3486,8 @@ function Invoke-CPanCleaner {
         $diagnostics = @(Get-CPanDiagnostics -RepositoryPath $RepositoryPath)
     } elseif ($Action -eq 'DisableWindowsUpdate') {
         $diagnostics = @(Invoke-CPanDisableWindowsUpdateDownloads -Context $context -Apply:$effectiveApply -IsAdmin $isAdmin)
+    } elseif ($Action -eq 'RestoreWindowsUpdate') {
+        $diagnostics = @(Invoke-CPanRestoreWindowsUpdate -Context $context -Apply:$effectiveApply -IsAdmin $isAdmin)
     } elseif ($Action -eq 'OptimizePerformance') {
         $diagnostics = @(Invoke-CPanOptimizePerformance -Context $context -RepositoryPath $RepositoryPath -Apply:$effectiveApply)
     } elseif ($Action -eq 'PreventPerformanceSpikes') {
@@ -3416,7 +3529,7 @@ function Invoke-CPanCleaner {
     $summary = [pscustomobject]@{
         Version = $script:CleanerVersion
         Action = $Action
-        Mode = if (($Action -in @('Clean','ReviewDownloads','Migrate','DisableWindowsUpdate','OptimizePerformance','PreventPerformanceSpikes','RepairRunHistory') -or ($Action -eq 'ManageGuard' -and $GuardOperation -ne 'Status')) -and $effectiveApply) { 'Apply' } elseif ($Action -in @('Clean','ReviewDownloads','Migrate','DisableWindowsUpdate','OptimizePerformance','PreventPerformanceSpikes','RepairRunHistory') -or ($Action -eq 'ManageGuard' -and $GuardOperation -ne 'Status')) { 'DryRun' } else { 'ReadOnly' }
+        Mode = if (($Action -in @('Clean','ReviewDownloads','Migrate','DisableWindowsUpdate','RestoreWindowsUpdate','OptimizePerformance','PreventPerformanceSpikes','RepairRunHistory') -or ($Action -eq 'ManageGuard' -and $GuardOperation -ne 'Status')) -and $effectiveApply) { 'Apply' } elseif ($Action -in @('Clean','ReviewDownloads','Migrate','DisableWindowsUpdate','RestoreWindowsUpdate','OptimizePerformance','PreventPerformanceSpikes','RepairRunHistory') -or ($Action -eq 'ManageGuard' -and $GuardOperation -ne 'Status')) { 'DryRun' } else { 'ReadOnly' }
         IsAdministrator = $isAdmin
         Include = ($Include -join ',')
         MinimumAgeDays = $MinimumAgeDays

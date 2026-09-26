@@ -88,7 +88,7 @@ Assert-True -Condition ($featureCatalog.Count -gt 0) -Message 'GUI feature catal
 foreach ($risk in @('Low', 'Medium', 'High')) {
     Assert-True -Condition (@($featureCatalog | Where-Object { $_.risk -eq $risk }).Count -gt 0) -Message "GUI should expose a $risk risk tab."
 }
-foreach ($id in @('aggressive-history', 'netlimiter-stats', 'disable-windows-update', 'optimize-performance', 'prevent-performance-spikes', 'performance-guard-task', 'windows-update-guard-task', 'repair-run-history', 'close-widgets', 'visual-studio-packages', 'storage-analysis', 'browser-offline-cache', 'qoder-cache', 'nuget-cache', 'nuget-migrate', 'nuget-remove-source', 'nuget-rollback', 'downloads-review', 'docker-migration-guide', 'wsl-migration-guide', 'visual-studio-migration-guide')) {
+foreach ($id in @('aggressive-history', 'netlimiter-stats', 'disable-windows-update', 'restore-windows-update', 'optimize-performance', 'prevent-performance-spikes', 'performance-guard-task', 'windows-update-guard-task', 'repair-run-history', 'close-widgets', 'visual-studio-packages', 'storage-analysis', 'browser-offline-cache', 'qoder-cache', 'nuget-cache', 'nuget-migrate', 'nuget-remove-source', 'nuget-rollback', 'downloads-review', 'docker-migration-guide', 'wsl-migration-guide', 'visual-studio-migration-guide')) {
     Assert-True -Condition (@($featureCatalog | Where-Object { $_.id -eq $id }).Count -eq 1) -Message "GUI should expose restored historical feature $id exactly once."
 }
 foreach ($feature in $featureCatalog) {
