@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.2 - 2026-10-03
+
+- Kept `UsoSvc` and Microsoft Store/WinGet dependencies available when disabling automatic Windows Update downloads, and added an explicit restore workflow for policies, services, scheduled tasks, and `WindowsUpdateGuard`.
+- Enabled selection and execution for `AnalyzeStorage` results that map to existing exact cleanup targets; the apply action passes only the checked target IDs to the `Clean` backend.
+- Kept high-risk, migration-only, manual-guidance, empty, and unmapped analysis rows non-selectable, while process-blocked targets remain safely skippable by the backend.
+- Restricted every analysis mapping to the displayed root and kept low-risk Chrome/Edge selection separate from medium-risk Service Worker offline caches.
+- Added executable GUI logic tests plus PowerShell fixtures covering result parsing, selection filtering, command construction, and analysis-to-allowlist boundaries.
+
 ## 2.4.1 - 2026-08-31
 
 - Added readable, wrapping hover tooltips to every text cell in the execution-result grid, with ellipsis, resizable columns, and horizontal scrolling for smaller windows.

@@ -1,6 +1,6 @@
 # CPanCleaner
 
-CPanCleaner 2.4.1 是一个面向 Windows 10/11 的 C# WPF 图形化空间与性能维护工具。界面按风险分为“安全 / 中等风险 / 高风险”三个 Tab；每个 Tab 再按用途分组，选择功能后会动态显示实现原理、可能影响、涉及路径、权限要求、安全护栏和历史来源。执行结果中的文本单元格支持鼠标悬停查看可换行的完整内容。
+CPanCleaner 2.4.2 是一个面向 Windows 10/11 的 C# WPF 图形化空间与性能维护工具。界面按风险分为“安全 / 中等风险 / 高风险”三个 Tab；每个 Tab 再按用途分组，选择功能后会动态显示实现原理、可能影响、涉及路径、权限要求、安全护栏和历史来源。执行结果中的文本单元格支持鼠标悬停查看可换行的完整内容。
 
 工具仍遵循“先扫描或 dry-run、再明确确认、最后 apply”的执行模型。PowerShell 后端保留系统操作的可审计性，C# 只负责界面、异步执行、结果展示、UAC 和风险确认。
 
@@ -31,6 +31,7 @@ PowerShell 仍适合服务、注册表、计划任务、BITS 和缓存目录操�
 ## 2.4 空间分析、清理和迁移
 
 - `AnalyzeStorage` 优先使用 `diskusage.exe /c` 获取 `SizeOnDiskBytes`，跳过重解析点；不可用时使用有数量上限的 .NET 扫描。结果同时提供 `ReclaimableBytes`、建议、阻塞进程和迁移支持状态。
+- 分析结果中只有能映射到既有精确白名单、存在可释放内容且目标位于该行显示根目录内的项目可以勾选。点击“清理勾选的白名单缓存”时只传递这些目标 ID，不会把 Chrome、Qoder、VS Code 等整个用户数据目录交给删除逻辑；高风险、迁移和人工建议保持不可选。
 - Chrome/Edge 会发现 `Default`、`Profile N`、`Guest Profile`、`System Profile`，普通缓存与 Service Worker 离线缓存分开分级；书签、Cookie、密码、扩展、IndexedDB 和 Local Storage 均不在目标内。
 - Chrome、Qoder、剪映、企业微信、VS Code、WPS、dotnet 等对应进程运行时，真实清理会返回 `BlockedByProcess`，程序从不自动结束这些进程。
 - Downloads 只列出根目录的 EXE/MSI/ZIP/CRDOWNLOAD，默认不选；永久删除前重新校验路径、大小和修改时间并记录 SHA256。
@@ -77,12 +78,14 @@ src/
   CPanCleaner.psm1                 清理、更新、性能与诊断核心
   CPanCleaner.Gui/
     MainWindow.xaml                三层风险 GUI
+    Models/OperationSelection.cs   勾选结果到精确清理目标的去重映射
     Resources/features.json        动态功能、原理和影响目录
     Services/CleanerBackend.cs     PowerShell、JSON、UAC 编排
 scripts/
   Close-WindowsWidgets.ps1         可 dry-run 的 Widgets 后端
 tests/
   Invoke-StaticTests.ps1           安全边界与历史功能测试
+  CPanCleaner.Gui.LogicTests/      GUI 结果解析、选择和后端参数行为测试
 docs/
   SAFETY.md
   GUI_ARCHITECTURE.md

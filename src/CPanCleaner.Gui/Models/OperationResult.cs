@@ -33,6 +33,7 @@ public sealed class OperationItem : INotifyPropertyChanged
     public string ProcessBlockers { get; set; } = string.Empty;
     public string MigrationSupport { get; set; } = string.Empty;
     public bool CanSelect { get; set; }
+    public string[] CleanupTargetIds { get; set; } = Array.Empty<string>();
     public string IdentityToken { get; set; } = string.Empty;
     public string Sha256 { get; set; } = string.Empty;
     public string Publisher { get; set; } = string.Empty;

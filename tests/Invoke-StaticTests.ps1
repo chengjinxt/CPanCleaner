@@ -63,7 +63,7 @@ Assert-True -Condition ($performancePreventPreview.Items.Count -eq 0) -Message '
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'GuardControl' -and $_.Name -eq '\CPanCleaner\PerformanceGuard' }).Count -eq 1) -Message 'PreventPerformanceSpikes should explain that PerformanceGuard is managed separately.'
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq 'TGitCacheCheckContentMaxSize' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan TortoiseGit content hashing reduction.'
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq 'core.fsmonitor' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan global Git fsmonitor hardening.'
-Assert-True -Condition ($performancePreventPreview.Version -eq '2.4.1') -Message 'Result-tooltip release should report version 2.4.1.'
+Assert-True -Condition ($performancePreventPreview.Version -eq '2.4.2') -Message 'Selectable storage-cleanup release should report version 2.4.2.'
 
 $guardStatus = Invoke-CPanCleaner -Action ManageGuard -GuardName PerformanceGuard -GuardOperation Status -Quiet
 Assert-True -Condition ($guardStatus.Mode -eq 'ReadOnly') -Message 'Guard status must be read-only.'
@@ -84,6 +84,7 @@ Assert-True -Condition ($runHistoryBefore -eq $runHistoryAfter) -Message 'Run hi
 
 $featureCatalogPath = Join-Path $root 'src\CPanCleaner.Gui\Resources\features.json'
 $featureCatalog = @(Get-Content -LiteralPath $featureCatalogPath -Raw -Encoding UTF8 | ConvertFrom-Json)
+$featureCatalogItems = if ($featureCatalog.Count -eq 1 -and $featureCatalog[0] -is [array]) { @($featureCatalog[0]) } else { @($featureCatalog) }
 Assert-True -Condition ($featureCatalog.Count -gt 0) -Message 'GUI feature catalog should not be empty.'
 foreach ($risk in @('Low', 'Medium', 'High')) {
     Assert-True -Condition (@($featureCatalog | Where-Object { $_.risk -eq $risk }).Count -gt 0) -Message "GUI should expose a $risk risk tab."
@@ -96,6 +97,10 @@ foreach ($feature in $featureCatalog) {
     Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($feature.impact)) -Message "Feature $($feature.id) should explain its potential impact."
     Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($feature.safeguards)) -Message "Feature $($feature.id) should explain its safeguards."
 }
+
+$storageAnalysisFeature = $featureCatalogItems | Where-Object { $_.id -eq 'storage-analysis' } | Select-Object -First 1
+Assert-True -Condition ($storageAnalysisFeature.supportsApply -eq $true) -Message 'Storage analysis should allow applying explicitly selected cleanup targets.'
+Assert-True -Condition ($storageAnalysisFeature.selectableResults -eq $true) -Message 'Storage analysis should mark its safe cleanup results as selectable.'
 
 $wrapperPath = Join-Path $root 'CPanCleaner.ps1'
 $widgetsCompatibilityJson = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapperPath -Action CloseWidgets -DryRun -Json
@@ -153,20 +158,62 @@ foreach ($target in $browserTargets) {
 $browserOfflineTargets = @(Get-CPanCleanerTarget -Include BrowserOfflineCache)
 Assert-False -Condition (@($browserOfflineTargets | Where-Object Default).Count -gt 0) -Message 'Service Worker offline cache must never be part of Default cleaning.'
 Assert-False -Condition (@($browserOfflineTargets | Where-Object Risk -ne 'Medium').Count -gt 0) -Message 'Service Worker offline cache must remain medium risk.'
+$exactPlaywrightTarget = @(Get-CPanCleanerTarget -Include 'Id:PlaywrightCache')
+Assert-True -Condition ($exactPlaywrightTarget.Count -eq 1 -and $exactPlaywrightTarget[0].Id -eq 'PlaywrightCache') -Message 'An explicit Id selector must not expand to sibling targets when a target ID equals its category.'
 
 $browserFixture = Join-Path $env:TEMP ('cpancleaner-browser-' + [guid]::NewGuid().ToString('N'))
 $previousLocalAppData = $env:LOCALAPPDATA
+$previousAppData = $env:APPDATA
+$previousUserProfileForStorage = $env:USERPROFILE
 try {
     $env:LOCALAPPDATA = $browserFixture
+    $env:APPDATA = Join-Path $browserFixture 'Roaming'
+    $env:USERPROFILE = Join-Path $browserFixture 'Profile'
     New-Item -ItemType Directory -Path (Join-Path $browserFixture 'Google\Chrome\User Data\Default\Cache') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $browserFixture 'Google\Chrome\User Data\Default\Service Worker\CacheStorage') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $browserFixture 'Google\Chrome\User Data\Profile 12\Code Cache') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $browserFixture 'Google\Chrome\User Data\Profile Bad\Cache') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $browserFixture 'Google\Chrome\User Data\Default\Extensions') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $env:LOCALAPPDATA 'ms-playwright') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $env:LOCALAPPDATA 'ms-playwright-go') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $env:LOCALAPPDATA 'NuGet\v3-cache') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $env:APPDATA 'Code\CachedExtensionVSIXs') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $env:USERPROFILE '.vscode\extensions\.11111111-1111-1111-1111-111111111111') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $env:USERPROFILE '.nuget\packages') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $browserFixture 'Google\Chrome\User Data\Default\Cache\basic.cache') -Value ('basic' * 4096) -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $browserFixture 'Google\Chrome\User Data\Default\Service Worker\CacheStorage\offline.cache') -Value ('offline' * 4096) -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'ms-playwright\browser.pkg') -Value ('playwright' * 4096) -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'ms-playwright-go\browser.pkg') -Value ('playwright-go' * 4096) -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'NuGet\v3-cache\cache.bin') -Value ('nuget-v3' * 4096) -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $env:APPDATA 'Code\CachedExtensionVSIXs\extension.vsix') -Value ('vsix' * 4096) -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $env:USERPROFILE '.vscode\extensions\.11111111-1111-1111-1111-111111111111\staging.bin') -Value ('staging' * 4096) -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $env:USERPROFILE '.nuget\packages\package.bin') -Value ('nuget-package' * 4096) -Encoding ASCII
     $discoveredBrowserTargets = @(Get-CPanBrowserCacheTargets)
-    Assert-True -Condition ($discoveredBrowserTargets.Count -eq 2) -Message 'Browser discovery should include Default and numeric Profile N caches only.'
+    Assert-True -Condition ($discoveredBrowserTargets.Count -eq 3) -Message 'Browser discovery should include the two basic-cache fixtures and the separate offline-cache fixture only.'
     Assert-False -Condition (@($discoveredBrowserTargets | Where-Object { $_.Path -match 'Profile Bad|Extensions' }).Count -gt 0) -Message 'Browser discovery must reject arbitrary profile names and extension data.'
+
+    $storageAnalysis = @(Get-CPanStorageAnalysis -AnalysisScope Profile -MaxScanItems 1000)
+    $chromeAnalysis = @($storageAnalysis | Where-Object { $_.Id -eq 'ChromeData' })[0]
+    Assert-True -Condition ($null -ne $chromeAnalysis.PSObject.Properties['CanSelect']) -Message 'Storage analysis results with cleanup mappings should expose CanSelect.'
+    Assert-True -Condition ($chromeAnalysis.CanSelect -eq $true) -Message 'Chrome analysis should be selectable even when Chrome is currently blocking apply.'
+    Assert-True -Condition ($null -ne $chromeAnalysis.PSObject.Properties['CleanupTargetIds']) -Message 'Storage analysis should expose exact cleanup target IDs.'
+    Assert-True -Condition ($chromeAnalysis.CleanupTargetIds -contains 'ChromeDefaultCache') -Message 'Chrome analysis should map to its exact basic-cache target.'
+    Assert-False -Condition ($chromeAnalysis.CleanupTargetIds -contains 'ChromeDefaultOfflineCacheStorage') -Message 'Low-risk Chrome analysis must not silently include medium-risk Service Worker cache.'
+    $selectedChromeTargets = @(Get-CPanCleanerTarget -Include @($chromeAnalysis.CleanupTargetIds | ForEach-Object { "Id:$_" }))
+    Assert-True -Condition ($selectedChromeTargets.Count -gt 0) -Message 'Storage analysis cleanup IDs should resolve through the fixed target allowlist.'
+    Assert-False -Condition (@($selectedChromeTargets | Where-Object { $_.Category -ne 'BrowserCache' }).Count -gt 0) -Message 'Chrome analysis selection should resolve only to basic browser-cache targets.'
+    foreach ($analysisItem in @($storageAnalysis | Where-Object { $_.CleanupTargetIds.Count -gt 0 })) {
+        $analysisRoot = [System.IO.Path]::GetFullPath($analysisItem.Path).TrimEnd('\')
+        foreach ($mappedTarget in @(Get-CPanCleanerTarget -Include @($analysisItem.CleanupTargetIds | ForEach-Object { "Id:$_" }))) {
+            $mappedPath = [System.IO.Path]::GetFullPath($mappedTarget.Path).TrimEnd('\')
+            $isWithinAnalysisRoot = $mappedPath -eq $analysisRoot -or $mappedPath.StartsWith($analysisRoot + '\', [StringComparison]::OrdinalIgnoreCase)
+            Assert-True -Condition $isWithinAnalysisRoot -Message "Storage analysis item $($analysisItem.Id) must not clean sibling path $mappedPath outside displayed root $analysisRoot."
+        }
+    }
 } finally {
     $env:LOCALAPPDATA = $previousLocalAppData
+    $env:APPDATA = $previousAppData
+    $env:USERPROFILE = $previousUserProfileForStorage
     if (Test-Path -LiteralPath $browserFixture) { Remove-Item -LiteralPath $browserFixture -Recurse -Force }
 }
 

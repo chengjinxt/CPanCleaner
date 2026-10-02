@@ -1,6 +1,6 @@
 ﻿Set-StrictMode -Version 2.0
 
-$script:CleanerVersion = '2.4.1'
+$script:CleanerVersion = '2.4.2'
 
 function Get-CPanSystemDrive {
     $drive = $env:SystemDrive
@@ -697,21 +697,28 @@ function Get-CPanCleanerTarget {
     )
 
     $normalized = @($Include | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $requestedTargetIds = @($normalized | ForEach-Object {
+        if ($_.StartsWith('Id:', [StringComparison]::OrdinalIgnoreCase)) { $_.Substring(3) } else { $_ }
+    })
     $targets = @(Get-CPanStaticTargets)
     $targets += @(Get-CPanBrowserCacheTargets)
     $targets += @(Get-CPanApplicationCacheTargets)
-    if ($normalized -contains 'Default' -or $normalized -contains 'CodexRuntimeCache' -or $normalized -contains 'All' -or @($normalized | Where-Object { $_ -like 'CodexPreviousRuntime:*' }).Count -gt 0) {
+    if ($normalized -contains 'Default' -or $normalized -contains 'CodexRuntimeCache' -or $normalized -contains 'All' -or @($requestedTargetIds | Where-Object { $_ -like 'CodexPreviousRuntime:*' }).Count -gt 0) {
         $targets += @(Get-CPanCodexPreviousRuntimeTargets)
     }
 
-    if ($normalized -contains 'OldQuarantine' -or $normalized -contains 'All' -or @($normalized | Where-Object { $_ -like 'OldQuarantine:*' }).Count -gt 0) {
+    if ($normalized -contains 'OldQuarantine' -or $normalized -contains 'All' -or @($requestedTargetIds | Where-Object { $_ -like 'OldQuarantine:*' }).Count -gt 0) {
         $targets += @(Get-CPanOldQuarantineTargets)
     }
 
     $invalid = @($normalized | Where-Object {
         $includeItem = $_
-        $knownIncludes -notcontains $includeItem -and
-        @($targets | Where-Object { $_.Id -eq $includeItem }).Count -eq 0
+        if ($includeItem.StartsWith('Id:', [StringComparison]::OrdinalIgnoreCase)) {
+            $targetId = $includeItem.Substring(3)
+            return [string]::IsNullOrWhiteSpace($targetId) -or @($targets | Where-Object { $_.Id -eq $targetId }).Count -eq 0
+        }
+        return $knownIncludes -notcontains $includeItem -and
+               @($targets | Where-Object { $_.Id -eq $includeItem }).Count -eq 0
     })
 
     if ($invalid.Count -gt 0) {
@@ -730,6 +737,12 @@ function Get-CPanCleanerTarget {
 
     foreach ($includeItem in $normalized) {
         if ($includeItem -eq 'Default') {
+            continue
+        }
+
+        if ($includeItem.StartsWith('Id:', [StringComparison]::OrdinalIgnoreCase)) {
+            $targetId = $includeItem.Substring(3)
+            $selected += $targets | Where-Object { $_.Id -eq $targetId }
             continue
         }
 
@@ -1006,6 +1019,7 @@ function New-CPanStorageAnalysisItem {
         [string] $Recommendation = '',
         [string] $MigrationSupport = 'None',
         [string[]] $ProcessNames = @(),
+        [string[]] $CleanupTargetIds = @(),
         [int64] $ReclaimableBytes = 0,
         [int] $MaxScanItems = 100000
     )
@@ -1032,6 +1046,8 @@ function New-CPanStorageAnalysisItem {
         Recommendation = $Recommendation
         ProcessBlockers = ($blockers -join '; ')
         MigrationSupport = $MigrationSupport
+        CanSelect = $CleanupTargetIds.Count -gt 0 -and $ReclaimableBytes -gt 0
+        CleanupTargetIds = @($CleanupTargetIds)
     }
 }
 
@@ -1053,39 +1069,44 @@ function Get-CPanStorageAnalysis {
         $profileDefinitions = @()
         if ($env:LOCALAPPDATA) {
             $profileDefinitions += @(
-                [pscustomobject]@{ Id='ChromeData'; Name='Google Chrome 用户数据'; Path=(Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data'); Match='Chrome'; Risk='Low'; Processes=@('chrome'); Recommendation='可清理所有配置的精确缓存白名单；不触碰账号数据。'; Migration='Guidance' },
-                [pscustomobject]@{ Id='EdgeData'; Name='Microsoft Edge 用户数据'; Path=(Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'); Match='Edge'; Risk='Low'; Processes=@('msedge'); Recommendation='可清理所有配置的精确缓存白名单。'; Migration='Guidance' },
-                [pscustomobject]@{ Id='JianyingData'; Name='剪映用户数据'; Path=(Join-Path $env:LOCALAPPDATA 'JianyingPro'); Match='Jianying'; Risk='Low'; Processes=@('JianyingPro'); Recommendation='只清理 Cache 和日志；草稿、工程与安装文件保留。'; Migration='Guidance' },
-                [pscustomobject]@{ Id='DockerData'; Name='Docker Desktop 数据'; Path=(Join-Path $env:LOCALAPPDATA 'Docker'); Match='NoAutomaticMatch'; Risk='High'; Processes=@('Docker Desktop','com.docker.backend'); Recommendation='仅在 Docker Settings → Resources → Advanced 修改 Disk image location。'; Migration='Guidance' },
-                [pscustomobject]@{ Id='NpmData'; Name='npm 缓存'; Path=(Join-Path $env:LOCALAPPDATA 'npm-cache'); Match='Npm'; Risk='Low'; Processes=@('node'); Recommendation='缓存可重建；后续安装会重新下载。'; Migration='None' },
-                [pscustomobject]@{ Id='PlaywrightData'; Name='Playwright 浏览器包'; Path=(Join-Path $env:LOCALAPPDATA 'ms-playwright'); Match='Playwright'; Risk='Medium'; Processes=@('node','chrome','msedge'); Recommendation='清理后测试会重新下载浏览器包。'; Migration='None' }
+                [pscustomobject]@{ Id='ChromeData'; Name='Google Chrome 用户数据'; Path=(Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data'); CleanupCategories=@('BrowserCache'); CleanupIdPattern='^Chrome'; Risk='Low'; Processes=@('chrome'); Recommendation='可清理所有配置的精确基础缓存白名单；不触碰 Service Worker 离线数据或账号数据。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='EdgeData'; Name='Microsoft Edge 用户数据'; Path=(Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'); CleanupCategories=@('BrowserCache'); CleanupIdPattern='^Edge'; Risk='Low'; Processes=@('msedge'); Recommendation='可清理所有配置的精确基础缓存白名单；不包含 Service Worker 离线数据。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='JianyingData'; Name='剪映用户数据'; Path=(Join-Path $env:LOCALAPPDATA 'JianyingPro'); CleanupCategories=@('JianyingCache'); Risk='Low'; Processes=@('JianyingPro'); Recommendation='只清理 Cache 和日志；草稿、工程与安装文件保留。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='DockerData'; Name='Docker Desktop 数据'; Path=(Join-Path $env:LOCALAPPDATA 'Docker'); Risk='High'; Processes=@('Docker Desktop','com.docker.backend'); Recommendation='仅在 Docker Settings → Resources → Advanced 修改 Disk image location。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='NpmData'; Name='npm 缓存'; Path=(Join-Path $env:LOCALAPPDATA 'npm-cache'); CleanupCategories=@('NpmCache'); Risk='Low'; Processes=@('node'); Recommendation='缓存可重建；后续安装会重新下载。'; Migration='None' },
+                [pscustomobject]@{ Id='PlaywrightData'; Name='Playwright 浏览器包'; Path=(Join-Path $env:LOCALAPPDATA 'ms-playwright'); CleanupCategories=@('PlaywrightCache'); CleanupIdPattern='^PlaywrightCache$'; Risk='Medium'; Processes=@('node','chrome','msedge'); Recommendation='清理后测试会重新下载浏览器包。'; Migration='None' }
             )
         }
         if ($env:APPDATA) {
             $profileDefinitions += @(
-                [pscustomobject]@{ Id='QoderData'; Name='Qoder 用户数据'; Path=(Join-Path $env:APPDATA 'Qoder'); Match='Qoder'; Risk='Medium'; Processes=@('Qoder'); Recommendation='只处理 SharedClientCache\index 和 cache；设置、聊天、历史保留。'; Migration='Guidance' },
-                [pscustomobject]@{ Id='TencentData'; Name='Tencent / 企业微信数据'; Path=(Join-Path $env:APPDATA 'Tencent'); Match='WXWork|XWeChat'; Risk='Medium'; Processes=@('WXWork','xwechat','WeChat'); Recommendation='仅处理升级包和明确日志；聊天记录保留。'; Migration='Guidance' },
-                [pscustomobject]@{ Id='VSCodeData'; Name='VS Code 用户数据'; Path=(Join-Path $env:APPDATA 'Code'); Match='VSCode'; Risk='Low'; Processes=@('Code'); Recommendation='只处理 VSIX 下载缓存和崩溃报告；当前扩展保留。'; Migration='Guidance' },
-                [pscustomobject]@{ Id='WpsData'; Name='WPS 用户数据'; Path=(Join-Path $env:APPDATA 'kingsoft'); Match='Wps'; Risk='Low'; Processes=@('wps','wpp','et','wpspdf'); Recommendation='只清理下载缓存和日志；addons 与文档保留。'; Migration='Guidance' }
+                [pscustomobject]@{ Id='QoderData'; Name='Qoder 用户数据'; Path=(Join-Path $env:APPDATA 'Qoder'); CleanupCategories=@('QoderCache'); Risk='Medium'; Processes=@('Qoder'); Recommendation='只处理 SharedClientCache\index 和 cache；设置、聊天、历史保留。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='TencentData'; Name='Tencent / 企业微信数据'; Path=(Join-Path $env:APPDATA 'Tencent'); CleanupCategories=@('WXWorkCache'); Risk='Medium'; Processes=@('WXWork','xwechat','WeChat'); Recommendation='仅处理升级包和明确日志；聊天记录保留。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='VSCodeData'; Name='VS Code 用户数据'; Path=(Join-Path $env:APPDATA 'Code'); CleanupCategories=@('VSCodeCache'); CleanupIdPattern='^VSCode(VsixCache|CrashReports)$'; Risk='Low'; Processes=@('Code'); Recommendation='只处理 VSIX 下载缓存和崩溃报告；当前扩展保留。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='WpsData'; Name='WPS 用户数据'; Path=(Join-Path $env:APPDATA 'kingsoft'); CleanupCategories=@('WpsCache'); Risk='Low'; Processes=@('wps','wpp','et','wpspdf'); Recommendation='只清理下载缓存和日志；addons 与文档保留。'; Migration='Guidance' }
             )
         }
         if ($env:USERPROFILE) {
             $profileDefinitions += @(
-                [pscustomobject]@{ Id='NuGetData'; Name='NuGet 全局包'; Path=(Join-Path $env:USERPROFILE '.nuget\packages'); Match='NuGetGlobal|NuGetV3|NuGetPlugins'; Risk='Medium'; Processes=@('dotnet','devenv','MSBuild','nuget'); Recommendation='可用内置事务流程迁移到非 C 盘本地 NTFS 空目录。'; Migration='Automatic' },
-                [pscustomobject]@{ Id='DocumentsData'; Name='Documents（受保护）'; Path=(Join-Path $env:USERPROFILE 'Documents'); Match='NoAutomaticMatch'; Risk='High'; Processes=@(); Recommendation='文档、聊天和项目不自动删除或迁移；请按应用设置逐项审查。'; Migration='Guidance' },
-                [pscustomobject]@{ Id='DownloadsData'; Name='Downloads（逐文件审查）'; Path=(Join-Path $env:USERPROFILE 'Downloads'); Match='NoAutomaticMatch'; Risk='High'; Processes=@(); Recommendation='只列出直接文件，默认不选；文件变化时跳过。'; Migration='None' },
-                [pscustomobject]@{ Id='CodexData'; Name='Codex 用户数据（受保护）'; Path=(Join-Path $env:USERPROFILE '.codex'); Match='NoAutomaticMatch'; Risk='High'; Processes=@('Codex'); Recommendation='不自动清理或迁移当前 Codex 数据。'; Migration='Guidance' }
+                [pscustomobject]@{ Id='NuGetData'; Name='NuGet 全局包'; Path=(Join-Path $env:USERPROFILE '.nuget\packages'); CleanupCategories=@('NuGetCache'); CleanupIdPattern='^NuGetGlobalPackages$'; Risk='Medium'; Processes=@('dotnet','devenv','MSBuild','nuget'); Recommendation='可清理全局包缓存；如需保留并迁移，请改用内置事务迁移流程。'; Migration='Automatic' },
+                [pscustomobject]@{ Id='DocumentsData'; Name='Documents（受保护）'; Path=(Join-Path $env:USERPROFILE 'Documents'); Risk='High'; Processes=@(); Recommendation='文档、聊天和项目不自动删除或迁移；请按应用设置逐项审查。'; Migration='Guidance' },
+                [pscustomobject]@{ Id='DownloadsData'; Name='Downloads（逐文件审查）'; Path=(Join-Path $env:USERPROFILE 'Downloads'); Risk='High'; Processes=@(); Recommendation='请使用“Downloads 安装包逐文件审查”；文件默认不选且变化时跳过。'; Migration='None' },
+                [pscustomobject]@{ Id='CodexData'; Name='Codex 用户数据（受保护）'; Path=(Join-Path $env:USERPROFILE '.codex'); Risk='High'; Processes=@('Codex'); Recommendation='不自动清理或迁移当前 Codex 数据。'; Migration='Guidance' }
             )
         }
 
         foreach ($definition in $profileDefinitions) {
+            $cleanupCategories = if ($definition.PSObject.Properties.Name -contains 'CleanupCategories') { @($definition.CleanupCategories) } else { @() }
+            $cleanupIdPattern = if ($definition.PSObject.Properties.Name -contains 'CleanupIdPattern') { $definition.CleanupIdPattern } else { '.*' }
+            $matchedTargets = @($cleanupTargets | Where-Object {
+                $cleanupCategories -contains $_.Category -and $_.Id -match $cleanupIdPattern
+            })
             $reclaimable = [int64] 0
-            foreach ($target in $cleanupTargets | Where-Object { $_.Id -match $definition.Match -or $_.Category -match $definition.Match }) {
+            foreach ($target in $matchedTargets) {
                 $reclaimable += [int64] $targetSizes[$target.Id]
             }
             $items += New-CPanStorageAnalysisItem -Id $definition.Id -Name $definition.Name -Path $definition.Path -Risk $definition.Risk `
                 -Recommendation $definition.Recommendation -MigrationSupport $definition.Migration -ProcessNames $definition.Processes `
-                -ReclaimableBytes $reclaimable -MaxScanItems $MaxScanItems
+                -CleanupTargetIds @($matchedTargets | ForEach-Object { $_.Id }) -ReclaimableBytes $reclaimable -MaxScanItems $MaxScanItems
         }
     }
 
@@ -1345,7 +1366,7 @@ function Invoke-CPanNuGetMigration {
             }
             throw
         }
-        $manifest = [pscustomobject]@{ Version='2.4.1'; Source=$source; Destination=$validated.Path; PreviousUserValue=$previousUserValue; SourceBytes=$verification.SourceBytes; SourceCount=$verification.SourceCount; CopyVerified=$true; SourceRemoved=$false; PreparedAt=(Get-Date).ToString('o') }
+        $manifest = [pscustomobject]@{ Version='2.4.2'; Source=$source; Destination=$validated.Path; PreviousUserValue=$previousUserValue; SourceBytes=$verification.SourceBytes; SourceCount=$verification.SourceCount; CopyVerified=$true; SourceRemoved=$false; PreparedAt=(Get-Date).ToString('o') }
         $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8
         try {
             [Environment]::SetEnvironmentVariable('NUGET_PACKAGES',$validated.Path,'User')

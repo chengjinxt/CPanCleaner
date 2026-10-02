@@ -269,7 +269,14 @@
                                 </ContextMenu>
                             </DataGrid.ContextMenu>
                             <DataGrid.Columns>
-                                <DataGridCheckBoxColumn Header="选择" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="50" />
+                                <DataGridCheckBoxColumn Header="选择" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="50">
+                                    <DataGridCheckBoxColumn.CellStyle>
+                                        <Style TargetType="DataGridCell">
+                                            <Setter Property="IsEnabled" Value="{Binding CanSelect}" />
+                                            <Setter Property="ToolTip" Value="只有带有精确清理白名单或逐文件身份校验的结果才可选择。" />
+                                        </Style>
+                                    </DataGridCheckBoxColumn.CellStyle>
+                                </DataGridCheckBoxColumn>
                                 <DataGridTextColumn Header="类型" Binding="{Binding Type}" Width="85" IsReadOnly="True" ElementStyle="{StaticResource ResultCellTextStyle}" />
                                 <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="180" IsReadOnly="True" ElementStyle="{StaticResource ResultCellTextStyle}" />
                                 <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="125" IsReadOnly="True" ElementStyle="{StaticResource ResultCellTextStyle}" />

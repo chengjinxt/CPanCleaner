@@ -30,6 +30,8 @@ Windows
 
 `HighRiskConfirmationWindow` 要求用户输入“执行”。中低风险使用普通确认对话框，所有修改型功能均保留预览入口。
 
+`AnalyzeStorage` 的预览结果可以携带后端生成的 `CleanupTargetIds`。只有目标属于固定 allowlist、确有可释放内容且位于该分析行显示根目录内时，`CanSelect` 才为真。界面只汇总用户明确勾选的目标 ID；执行时 `CleanerBackend` 将动作从只读 `AnalyzeStorage` 切换为 `Clean`，并通过精确 `-Include` 调用既有清理逻辑。高风险、迁移和人工建议不产生可执行目标。
+
 ## 功能目录
 
 `Resources/features.json` 是展示层的唯一功能目录。它不包含可执行 PowerShell 文本，只包含经过枚举的：

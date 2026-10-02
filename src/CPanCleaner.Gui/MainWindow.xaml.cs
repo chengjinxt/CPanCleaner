@@ -125,6 +125,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         SelectedFeature = feature;
         Results.Clear();
+        UpdateButtonState();
         var usesMinimumAge = feature.Action.Equals("Clean", StringComparison.OrdinalIgnoreCase) ||
                              feature.Action.Equals("Scan", StringComparison.OrdinalIgnoreCase);
         MinimumAgePanel.Visibility = usesMinimumAge ? Visibility.Visible : Visibility.Collapsed;
@@ -195,7 +196,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         if (SelectedFeature.SelectableResults && !Results.Any(item => item.CanSelect && item.IsSelected))
         {
-            MessageBox.Show(this, "请先在预览结果中逐项勾选要永久删除的文件。", "尚未选择文件", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show(this, "请先在预览结果中勾选要清理的白名单缓存或要永久删除的文件。", "尚未选择项目", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
         if (!ConfirmApply(SelectedFeature))
@@ -263,6 +264,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             ? Results.Where(item => item.CanSelect && item.IsSelected && !string.IsNullOrWhiteSpace(item.IdentityToken))
                 .Select(item => item.IdentityToken).ToArray()
             : Array.Empty<string>();
+        var selectedCleanupTargetIds = apply && feature.Action.Equals("AnalyzeStorage", StringComparison.OrdinalIgnoreCase)
+            ? OperationSelection.GetCleanupTargetIds(Results)
+            : Array.Empty<string>();
         Results.Clear();
         _operationCancellation?.Cancel();
         var operationCancellation = new CancellationTokenSource();
@@ -280,15 +284,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 guardOperation,
                 guardIntervalMinutes,
                 feature.RequiresDestination ? DestinationPathBox.Text.Trim() : null,
-                selectedTokens);
+                selectedTokens,
+                selectedCleanupTargetIds);
             if (!ReferenceEquals(SelectedFeature, feature))
             {
                 return;
             }
             foreach (var item in result.Items)
             {
+                item.PropertyChanged += OperationItem_OnPropertyChanged;
                 Results.Add(item);
             }
+            UpdateButtonState();
             if (feature.SupportsSchedule && string.Equals(guardOperation, "Status", StringComparison.OrdinalIgnoreCase))
             {
                 var intervalMatch = result.Items
@@ -352,6 +359,27 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private bool ConfirmApply(CleanerFeature feature)
     {
+        if (feature.Action.Equals("AnalyzeStorage", StringComparison.OrdinalIgnoreCase))
+        {
+            var selected = Results.Where(item => item.CanSelect && item.IsSelected).ToArray();
+            if (selected.Any(item => item.Risk.Equals("High", StringComparison.OrdinalIgnoreCase)))
+            {
+                MessageBox.Show(this, "空间分析页不允许直接执行高风险建议；请使用对应的高风险功能或官方迁移入口。", "不能直接清理", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+            var reclaimable = selected.Sum(item => item.ReclaimableBytes);
+            var riskText = selected.Any(item => item.Risk.Equals("Medium", StringComparison.OrdinalIgnoreCase))
+                ? "包含中等风险缓存，清理后可能需要重新下载或重建。"
+                : "所选项目均映射到低风险精确缓存白名单。";
+            var details = string.Join("\n", selected.Take(8).Select(item => $"• {item.Name}：{item.Recommendation}"));
+            if (selected.Length > 8)
+            {
+                details += $"\n…另有 {selected.Length - 8} 项";
+            }
+            var analysisMessage = $"将按建议清理 {selected.Length} 项可重建缓存，预计最多释放 {reclaimable / 1024d / 1024d / 1024d:N2} GB。\n\n{riskText}\n\n{details}\n\n只会执行结果携带的精确白名单目标，不会删除表格中的整个用户数据目录；仍被进程占用的目标会安全跳过。确认继续吗？";
+            return MessageBox.Show(this, analysisMessage, "确认清理所选建议", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
+        }
+
         if (feature.Risk == "High")
         {
             var selected = Results.Where(item => item.CanSelect && item.IsSelected).ToArray();
@@ -373,6 +401,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void CancelButton_OnClick(object sender, RoutedEventArgs e)
     {
         _operationCancellation?.Cancel();
+    }
+
+    private void OperationItem_OnPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(OperationItem.IsSelected))
+        {
+            UpdateButtonState();
+        }
     }
 
     private void OpenLogsButton_OnClick(object sender, RoutedEventArgs e)
@@ -525,7 +561,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
         PreviewButton.IsEnabled = SelectedFeature is not null && !IsBusy;
-        ApplyButton.IsEnabled = SelectedFeature is { SupportsApply: true } && !IsBusy;
+        ApplyButton.IsEnabled = SelectedFeature is { SupportsApply: true } &&
+                                !IsBusy &&
+                                (SelectedFeature.SelectableResults == false || Results.Any(item => item.CanSelect && item.IsSelected));
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)

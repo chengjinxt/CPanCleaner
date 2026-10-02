@@ -71,6 +71,10 @@ Windows Update 缓存只处理 `SoftwareDistribution\Download`、升级暂存和
 - 单项占用或访问失败只记录该项，不扩大删除范围。
 - 目标应用进程运行时真实清理返回 `BlockedByProcess`；不会自动结束 Chrome、Qoder、剪映、企业微信、VS Code、WPS 或 dotnet。
 
+### 空间分析勾选清理
+
+空间分析表格展示的是用户数据或应用数据总目录，但可勾选项携带的是该目录内部既有清理注册表生成的精确目标 ID。执行不会删除表格显示的整个目录。目标必须同时满足固定 allowlist、存在可释放内容、位于显示根目录内；Chrome/Edge 基础缓存不会包含单独分级的 Service Worker 离线缓存。高风险目录、迁移建议和人工处理建议没有可执行目标，复选框保持禁用。被进程占用的目标允许加入本次选择，但后端在真实执行时返回 `BlockedByProcess` 并跳过，不会结束进程。
+
 ### Downloads 逐文件删除
 
 只列出 Downloads 根目录中的 `.exe`、`.msi`、`.zip` 和 `.crdownload`。所有行默认未选；执行前要求高风险文字确认，并重新核对直接父目录、扩展名、大小和 UTC 修改时间。文件变化、重解析点、子目录或其它扩展名一律跳过；成功删除会记录执行前 SHA256。
@@ -91,9 +95,9 @@ Windows Update 缓存只处理 `SoftwareDistribution\Download`、升级暂存和
 
 ### 禁用 Windows Update
 
-该动作同时处理策略、`wuauserv`、`UsoSvc`、`DoSvc`、`WaaSMedicSvc`、BITS 作业及 WindowsUpdate/UpdateOrchestrator/WaaSMedic 任务，但不再自动安装 `\CPanCleaner\WindowsUpdateGuard`。
+该动作只设置“通知但不自动下载”等限制策略，调整 `wuauserv`、`WaaSMedicSvc`、BITS 作业及非核心更新任务；保留 Microsoft Store 和 WinGet 依赖的 `UsoSvc` 及核心 UpdateOrchestrator 任务，也不再自动安装 `\CPanCleaner\WindowsUpdateGuard`。
 
-它可能阻止安全更新、Defender 情报、驱动和功能更新。当前 GUI 没有“一键恢复 Windows Update 默认状态”，因此只有能够手工恢复策略、服务和计划任务的用户才应执行。缓存删除与禁用自动下载是两个独立动作。
+它可能阻止安全更新、Defender 情报、驱动和功能更新自动下载。GUI 提供独立的“恢复 Windows 更新与微软商店”功能，用于移除限制策略、恢复服务与系统任务，并注销可能重新施加限制的 `WindowsUpdateGuard`。缓存删除与禁用自动下载仍是两个独立动作。
 
 ### 性能防复发
 
@@ -107,7 +111,7 @@ Windows Update 缓存只处理 `SoftwareDistribution\Download`、升级暂存和
 
 - 功能目录只决定界面展示和传给后端的固定参数，不执行任意命令文本。
 - C# 使用 `ProcessStartInfo.ArgumentList` 传参，避免拼接用户输入形成 PowerShell 命令。
-- 可变输入包括 0–3650 的保留天数、5–1440 分钟任务周期、经过严格验证的 NuGet 目标空目录，以及后端生成的 Downloads 身份令牌。
+- 可变输入包括 0–3650 的保留天数、5–1440 分钟任务周期、经过严格验证的 NuGet 目标空目录、后端生成的 Downloads 身份令牌，以及空间分析结果携带并由目标注册表再次校验的精确清理 ID。
 - 普通执行直接捕获 JSON；管理员执行使用 UAC 隔离进程，通过一次性随机文件名 JSON 回传结果并在读取后删除。
 - 取消只能终止仍在运行的进程，已经完成的系统操作不会自动回滚。
 

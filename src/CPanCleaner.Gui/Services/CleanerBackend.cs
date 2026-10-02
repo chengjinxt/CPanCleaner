@@ -36,7 +36,8 @@ public sealed class CleanerBackend
         string? guardOperation = null,
         int guardIntervalMinutes = 15,
         string? destinationPath = null,
-        IReadOnlyCollection<string>? selectedItemTokens = null)
+        IReadOnlyCollection<string>? selectedItemTokens = null,
+        IReadOnlyCollection<string>? selectedCleanupTargetIds = null)
     {
         var script = feature.OperationKind.Equals("Widgets", StringComparison.OrdinalIgnoreCase)
             ? _widgetsScript
@@ -45,7 +46,7 @@ public sealed class CleanerBackend
         var resultDirectory = Path.Combine(Path.GetTempPath(), "CPanCleaner", "operation-results");
         Directory.CreateDirectory(resultDirectory);
         var resultPath = Path.Combine(resultDirectory, $"result-{Guid.NewGuid():N}.json");
-        var arguments = BuildArguments(feature, apply, minimumAgeDays, script, resultPath, guardOperation, guardIntervalMinutes, destinationPath, selectedItemTokens);
+        var arguments = BuildArguments(feature, apply, minimumAgeDays, script, resultPath, guardOperation, guardIntervalMinutes, destinationPath, selectedItemTokens, selectedCleanupTargetIds);
 
         if (requiresElevation)
         {
@@ -187,22 +188,33 @@ public sealed class CleanerBackend
         string? guardOperation,
         int guardIntervalMinutes,
         string? destinationPath,
-        IReadOnlyCollection<string>? selectedItemTokens)
+        IReadOnlyCollection<string>? selectedItemTokens,
+        IReadOnlyCollection<string>? selectedCleanupTargetIds)
     {
+        var storageCleanup = apply &&
+                             feature.Action.Equals("AnalyzeStorage", StringComparison.OrdinalIgnoreCase);
+        if (storageCleanup && selectedCleanupTargetIds is not { Count: > 0 })
+        {
+            throw new InvalidOperationException("空间分析清理必须包含用户明确勾选的白名单目标。 ");
+        }
+        var effectiveAction = storageCleanup ? "Clean" : feature.Action;
         var arguments = new List<string>
         {
             "-NoProfile",
             "-ExecutionPolicy", "Bypass",
             "-File", script,
-            "-Action", feature.Action
+            "-Action", effectiveAction
         };
 
-        if (feature.OperationKind.Equals("Cleaner", StringComparison.OrdinalIgnoreCase))
+        if (feature.OperationKind.Equals("Cleaner", StringComparison.OrdinalIgnoreCase) || storageCleanup)
         {
-            if (feature.Includes.Length > 0)
+            var includes = storageCleanup ? selectedCleanupTargetIds! : feature.Includes;
+            if (includes.Count > 0)
             {
                 arguments.Add("-Include");
-                arguments.Add(string.Join(",", feature.Includes));
+                arguments.Add(string.Join(",", includes
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Select(targetId => storageCleanup ? $"Id:{targetId}" : targetId)));
             }
             arguments.Add("-MinimumAgeDays");
             arguments.Add(minimumAgeDays.ToString(CultureInfo.InvariantCulture));
@@ -212,13 +224,13 @@ public sealed class CleanerBackend
             arguments.Add(Environment.CurrentDirectory);
         }
 
-        if (feature.Action.Equals("AnalyzeStorage", StringComparison.OrdinalIgnoreCase))
+        if (effectiveAction.Equals("AnalyzeStorage", StringComparison.OrdinalIgnoreCase))
         {
             arguments.Add("-AnalysisScope");
             arguments.Add(feature.AnalysisScope);
         }
 
-        if (feature.Action.Equals("Migrate", StringComparison.OrdinalIgnoreCase))
+        if (effectiveAction.Equals("Migrate", StringComparison.OrdinalIgnoreCase))
         {
             arguments.Add("-MigrationTarget");
             arguments.Add(feature.MigrationTarget);
@@ -231,7 +243,7 @@ public sealed class CleanerBackend
             }
         }
 
-        if (feature.Action.Equals("ReviewDownloads", StringComparison.OrdinalIgnoreCase) && selectedItemTokens is { Count: > 0 })
+        if (effectiveAction.Equals("ReviewDownloads", StringComparison.OrdinalIgnoreCase) && selectedItemTokens is { Count: > 0 })
         {
             arguments.Add("-SelectedItemTokens");
             foreach (var token in selectedItemTokens)
@@ -259,7 +271,7 @@ public sealed class CleanerBackend
         {
             arguments.Add("-Apply");
         }
-        else if (!feature.Action.Equals("Diagnose", StringComparison.OrdinalIgnoreCase) &&
+        else if (!effectiveAction.Equals("Diagnose", StringComparison.OrdinalIgnoreCase) &&
                  !(feature.SupportsSchedule && string.Equals(guardOperation, "Status", StringComparison.OrdinalIgnoreCase)))
         {
             arguments.Add("-DryRun");
@@ -309,6 +321,7 @@ public sealed class CleanerBackend
                     ProcessBlockers = GetString(item, "ProcessBlockers"),
                     MigrationSupport = GetString(item, "MigrationSupport"),
                     CanSelect = GetBoolean(item, "CanSelect"),
+                    CleanupTargetIds = GetStringArray(item, "CleanupTargetIds"),
                     IdentityToken = GetString(item, "IdentityToken"),
                     Sha256 = GetString(item, "Sha256"),
                     Publisher = GetString(item, "Publisher"),
@@ -412,6 +425,20 @@ public sealed class CleanerBackend
         return TryGetProperty(element, name, out var value) &&
                (value.ValueKind == JsonValueKind.True ||
                 value.ValueKind == JsonValueKind.String && bool.TryParse(value.GetString(), out var parsed) && parsed);
+    }
+
+    private static string[] GetStringArray(JsonElement element, string name)
+    {
+        if (!TryGetProperty(element, name, out var value) || value.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<string>();
+        }
+        return value.EnumerateArray()
+            .Where(item => item.ValueKind == JsonValueKind.String)
+            .Select(item => item.GetString())
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .Select(item => item!)
+            .ToArray();
     }
 
     private static double? GetNullableDouble(JsonElement element, string name)

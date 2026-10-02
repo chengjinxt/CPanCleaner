@@ -7,7 +7,9 @@ $requiredFiles = @(
     'docs\SAFETY.md',
     'docs\RELEASE.md',
     'docs\WINDOWS_WIDGETS.md',
-    'tests\Invoke-StaticTests.ps1'
+    'tests\Invoke-StaticTests.ps1',
+    'tests\CPanCleaner.Gui.LogicTests\CPanCleaner.Gui.LogicTests.csproj',
+    'tests\CPanCleaner.Gui.LogicTests\Program.cs'
 )
 
 foreach ($file in $requiredFiles) {
@@ -17,3 +19,8 @@ foreach ($file in $requiredFiles) {
 }
 
 & (Join-Path $PSScriptRoot 'tests\Invoke-StaticTests.ps1')
+
+& dotnet run --project (Join-Path $PSScriptRoot 'tests\CPanCleaner.Gui.LogicTests\CPanCleaner.Gui.LogicTests.csproj') --configuration Release
+if ($LASTEXITCODE -ne 0) {
+    throw "GUI logic tests failed with exit code $LASTEXITCODE."
+}
