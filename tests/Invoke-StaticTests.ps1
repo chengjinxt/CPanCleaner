@@ -24,6 +24,76 @@ function Assert-False {
     Assert-True -Condition (-not $Condition) -Message $Message
 }
 
+$apnicFixture = @(
+    'apnic|CN|ipv4|1.0.1.0|256|20110414|allocated',
+    'apnic|JP|ipv4|1.0.16.0|4096|20110412|allocated',
+    'apnic|CN|ipv6|2001:250::|32|19990826|allocated'
+)
+$chinaRanges = @(ConvertFrom-CPanApnicDelegatedData -Lines $apnicFixture)
+Assert-True -Condition ($chinaRanges.Count -eq 1) -Message 'APNIC parser should keep only China IPv4 ranges.'
+$apnicByteFixture = [System.Text.Encoding]::UTF8.GetBytes(($apnicFixture -join "`n"))
+$chinaRangesFromBytes = @(ConvertFrom-CPanApnicDelegatedData -Lines $apnicByteFixture)
+Assert-True -Condition ($chinaRangesFromBytes.Count -eq 1) -Message 'APNIC parser should decode application/octet-stream byte responses from Windows PowerShell.'
+Assert-True -Condition (Test-CPanIpv4InRanges -Address '1.0.1.42' -Ranges $chinaRanges) -Message 'China IPv4 address should match its delegated APNIC range.'
+Assert-False -Condition (Test-CPanIpv4InRanges -Address '1.0.16.1' -Ranges $chinaRanges) -Message 'Non-China IPv4 address must not match China ranges.'
+
+$ruleAudit = Get-CPanFlClashRuleAudit -Rules @(
+    'DOMAIN-SUFFIX,example.cn,Proxy',
+    'GEOIP,CN,DIRECT',
+    'DOMAIN-SUFFIX,example.cn,DIRECT',
+    'MATCH,Proxy'
+)
+Assert-True -Condition ($ruleAudit.FirstChinaDirectIndex -eq 1) -Message 'FlClash rule audit should locate the first China direct rule.'
+Assert-True -Condition ($ruleAudit.ProxyRulesBeforeChinaDirect -eq 1) -Message 'FlClash rule audit should count proxy rules that shadow China direct matching.'
+Assert-True -Condition ($ruleAudit.ExactProxyDirectConflicts -eq 1) -Message 'FlClash rule audit should report exact domain targets assigned to both proxy and direct.'
+Assert-False -Condition $ruleAudit.HasGeositeChinaDirectBeforeProxy -Message 'A later GEOIP rule must not be mistaken for an early GEOSITE China direct rule.'
+
+$connectionFixture = @(
+    [pscustomobject]@{ LocalAddress='198.18.0.1'; RemoteAddress='1.0.1.42'; State='Established'; OwningProcess=100; ProcessName='domestic-app' },
+    [pscustomobject]@{ LocalAddress='198.18.0.1'; RemoteAddress='1.0.1.43'; State='Established'; OwningProcess=101; ProcessName='direct-app' },
+    [pscustomobject]@{ LocalAddress='192.168.1.10'; RemoteAddress='1.0.1.43'; State='Established'; OwningProcess=900; ProcessName='FlClashCore' },
+    [pscustomobject]@{ LocalAddress='198.18.0.1'; RemoteAddress='1.0.16.1'; State='Established'; OwningProcess=102; ProcessName='foreign-app' }
+)
+$suspectedFlows = @(Get-CPanFlClashSuspectedDomesticProxyFlows -Connections $connectionFixture -CoreProcessId 900 -Ranges $chinaRanges)
+Assert-True -Condition ($suspectedFlows.Count -eq 1) -Message 'Only China app flows without a matching direct core connection should be flagged.'
+Assert-True -Condition ($suspectedFlows[0].ProcessName -eq 'domestic-app') -Message 'Suspected proxy flow should retain its owning process name.'
+Assert-True -Condition ($suspectedFlows[0].RemoteAddress -eq '1.0.1.42') -Message 'Suspected proxy flow should retain the China destination IP.'
+
+$controllerSnapshot = [pscustomobject]@{
+    connections = @(
+        [pscustomobject]@{ metadata=[pscustomobject]@{ host='cdn.example.cn'; destinationIP='1.0.1.42'; process='large-app' }; chains=@('ProxyNode','Proxy'); download=73400320; upload=10485760; rule='DomainSuffix'; rulePayload='example.cn' },
+        [pscustomobject]@{ metadata=[pscustomobject]@{ host='cdn.example.cn'; destinationIP='1.0.1.42'; process='large-app' }; chains=@('ProxyNode','Proxy'); download=31457280; upload=1048576; rule='DomainSuffix'; rulePayload='example.cn' },
+        [pscustomobject]@{ metadata=[pscustomobject]@{ host='direct.example.cn'; destinationIP='1.0.1.43'; process='direct-app' }; chains=@('DIRECT'); download=524288000; upload=0; rule='GeoIP'; rulePayload='CN' },
+        [pscustomobject]@{ metadata=[pscustomobject]@{ host='foreign.example'; destinationIP='1.0.16.1'; process='foreign-app' }; chains=@('ProxyNode','Proxy'); download=524288000; upload=0; rule='Match'; rulePayload='' }
+    )
+}
+$controllerFindings = @(Get-CPanFlClashControllerTrafficFindings -Snapshot $controllerSnapshot -Ranges $chinaRanges -LargeTrafficBytes 100MB)
+Assert-True -Condition ($controllerFindings.Count -eq 1) -Message 'Controller audit should keep only proxied China destinations and aggregate identical process/host connections.'
+Assert-True -Condition ($controllerFindings[0].TotalBytes -eq 116391936) -Message 'Controller audit should sum upload and download bytes without recomputing the expected value.'
+Assert-True -Condition $controllerFindings[0].IsLarge -Message 'Controller audit should flag aggregated traffic above the configured large-traffic threshold.'
+
+$flClashFixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('CPanCleaner-FlClash-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $flClashFixtureRoot -Force | Out-Null
+try {
+    [pscustomobject]@{
+        mode = 'rule'
+        rule = @('DOMAIN-SUFFIX,example.cn,Proxy', 'GEOIP,CN,DIRECT', 'MATCH,Proxy')
+        secret = ''
+        'external-controller' = ''
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $flClashFixtureRoot 'config.json') -Encoding UTF8
+
+    $routingAudit = @(Get-CPanFlClashRoutingAudit `
+        -DataRoot $flClashFixtureRoot `
+        -DelegatedLines $apnicFixture `
+        -Connections $connectionFixture `
+        -CoreProcessId 900)
+    Assert-True -Condition (@($routingAudit | Where-Object Type -eq 'ProxyRoutingCandidate').Count -eq 1) -Message 'Integrated FlClash audit should expose suspected domestic proxy flows.'
+    Assert-True -Condition (@($routingAudit | Where-Object { $_.Type -eq 'FlClashController' -and $_.Status -eq 'Disabled' }).Count -eq 1) -Message 'Integrated FlClash audit should explain that exact byte attribution needs the loopback controller.'
+    Assert-True -Condition (@($routingAudit | Where-Object Type -eq 'ProxyRoutingAdvice').Count -gt 0) -Message 'Integrated FlClash audit should return a persistent override recommendation.'
+} finally {
+    Remove-Item -LiteralPath $flClashFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 $systemDrive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') } else { 'C:' }
 $defaultTargets = @(Get-CPanCleanerTarget -Include Default)
 $allTargets = @(Get-CPanCleanerTarget -Include All)
@@ -63,7 +133,7 @@ Assert-True -Condition ($performancePreventPreview.Items.Count -eq 0) -Message '
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'GuardControl' -and $_.Name -eq '\CPanCleaner\PerformanceGuard' }).Count -eq 1) -Message 'PreventPerformanceSpikes should explain that PerformanceGuard is managed separately.'
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq 'TGitCacheCheckContentMaxSize' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan TortoiseGit content hashing reduction.'
 Assert-True -Condition (@($performancePreventPreview.Diagnostics | Where-Object { $_.Type -eq 'PlannedChange' -and $_.Name -eq 'core.fsmonitor' }).Count -eq 1) -Message 'PreventPerformanceSpikes dry-run should plan global Git fsmonitor hardening.'
-Assert-True -Condition ($performancePreventPreview.Version -eq '2.4.2') -Message 'Selectable storage-cleanup release should report version 2.4.2.'
+Assert-True -Condition ($performancePreventPreview.Version -eq '2.5.0') -Message 'Proxy-routing audit release should report version 2.5.0.'
 
 $guardStatus = Invoke-CPanCleaner -Action ManageGuard -GuardName PerformanceGuard -GuardOperation Status -Quiet
 Assert-True -Condition ($guardStatus.Mode -eq 'ReadOnly') -Message 'Guard status must be read-only.'
@@ -89,7 +159,7 @@ Assert-True -Condition ($featureCatalog.Count -gt 0) -Message 'GUI feature catal
 foreach ($risk in @('Low', 'Medium', 'High')) {
     Assert-True -Condition (@($featureCatalog | Where-Object { $_.risk -eq $risk }).Count -gt 0) -Message "GUI should expose a $risk risk tab."
 }
-foreach ($id in @('aggressive-history', 'netlimiter-stats', 'disable-windows-update', 'restore-windows-update', 'optimize-performance', 'prevent-performance-spikes', 'performance-guard-task', 'windows-update-guard-task', 'repair-run-history', 'close-widgets', 'visual-studio-packages', 'storage-analysis', 'browser-offline-cache', 'qoder-cache', 'nuget-cache', 'nuget-migrate', 'nuget-remove-source', 'nuget-rollback', 'downloads-review', 'docker-migration-guide', 'wsl-migration-guide', 'visual-studio-migration-guide')) {
+foreach ($id in @('aggressive-history', 'netlimiter-stats', 'disable-windows-update', 'restore-windows-update', 'optimize-performance', 'prevent-performance-spikes', 'performance-guard-task', 'windows-update-guard-task', 'repair-run-history', 'close-widgets', 'visual-studio-packages', 'storage-analysis', 'browser-offline-cache', 'qoder-cache', 'nuget-cache', 'nuget-migrate', 'nuget-remove-source', 'nuget-rollback', 'downloads-review', 'docker-migration-guide', 'wsl-migration-guide', 'visual-studio-migration-guide', 'proxy-routing-audit')) {
     Assert-True -Condition (@($featureCatalog | Where-Object { $_.id -eq $id }).Count -eq 1) -Message "GUI should expose restored historical feature $id exactly once."
 }
 foreach ($feature in $featureCatalog) {

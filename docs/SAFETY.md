@@ -2,7 +2,7 @@
 
 ## 执行模型
 
-CPanCleaner 2.4 的 GUI 和命令行后端共用同一套规则：
+CPanCleaner 2.5 的 GUI 和命令行后端共用同一套规则：
 
 1. 扫描和 dry-run 不删除文件、不写策略。
 2. 真实变更必须显式进入 apply。
@@ -23,6 +23,7 @@ CPanCleaner 2.4 的 GUI 和命令行后端共用同一套规则：
 - 远程桌面 bitmap cache。
 - 仅匹配 `codex-primary-runtime.previous-*` 的旧 Codex runtime。
 - Git/Conda/TortoiseGit 只读诊断。
+- FlClash 国内流量代理审计；只读取本地配置和活动连接，并缓存 APNIC 公共地址表，不修改代理设置。
 - 仅结束当前 Widgets 进程。
 - 全部合法 Chrome/Edge 配置中的基础缓存；VS Code 下载缓存、npm、剪映和 WPS 明确缓存。
 

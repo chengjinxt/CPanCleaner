@@ -1,6 +1,6 @@
 # CPanCleaner
 
-CPanCleaner 2.4.2 是一个面向 Windows 10/11 的 C# WPF 图形化空间与性能维护工具。界面按风险分为“安全 / 中等风险 / 高风险”三个 Tab；每个 Tab 再按用途分组，选择功能后会动态显示实现原理、可能影响、涉及路径、权限要求、安全护栏和历史来源。执行结果中的文本单元格支持鼠标悬停查看可换行的完整内容。
+CPanCleaner 2.5.0 是一个面向 Windows 10/11 的 C# WPF 图形化空间与性能维护工具。界面按风险分为“安全 / 中等风险 / 高风险”三个 Tab；每个 Tab 再按用途分组，选择功能后会动态显示实现原理、可能影响、涉及路径、权限要求、安全护栏和历史来源。执行结果中的文本单元格支持鼠标悬停查看可换行的完整内容。
 
 工具仍遵循“先扫描或 dry-run、再明确确认、最后 apply”的执行模型。PowerShell 后端保留系统操作的可审计性，C# 只负责界面、异步执行、结果展示、UAC 和风险确认。
 
@@ -36,6 +36,12 @@ PowerShell 仍适合服务、注册表、计划任务、BITS 和缓存目录操�
 - Chrome、Qoder、剪映、企业微信、VS Code、WPS、dotnet 等对应进程运行时，真实清理会返回 `BlockedByProcess`，程序从不自动结束这些进程。
 - Downloads 只列出根目录的 EXE/MSI/ZIP/CRDOWNLOAD，默认不选；永久删除前重新校验路径、大小和修改时间并记录 SHA256。
 - 自动迁移第一版只支持 [NuGet 全局包](https://learn.microsoft.com/nuget/consume-packages/managing-the-global-packages-and-cache-folders)。Prepare 复制、校验和切换但保留源；RemoveSource 需要单独确认；Rollback 使用 `%LOCALAPPDATA%\CPanCleaner\migrations` 中的清单。[Docker](https://docs.docker.com/desktop/settings-and-maintenance/settings/)、[WSL](https://learn.microsoft.com/windows/wsl/faq) 和 [Visual Studio](https://learn.microsoft.com/visualstudio/install/change-installation-locations?view=visualstudio) 只提供检测与官方入口。
+
+## 2.5 FlClash 国内流量代理审计
+
+“FlClash 国内流量代理审计”位于低风险页的“只读诊断”组。它检查 FlClash 当前接管模式和规则顺序，使用 APNIC 中国 IPv4 分配表归类活动 TCP 连接，并将“疑似误走代理”和“控制器确认经代理传输”分开显示。APNIC 数据缓存在 `%LOCALAPPDATA%\CPanCleaner\network-data`，有效期 7 天。
+
+默认审计无需管理员权限，也不会修改 FlClash 配置。若在 FlClash 中把外部控制器设为仅回环的 `127.0.0.1:9090`，审计还可读取 Mihomo `/connections`，按进程、目标、命中规则汇总活动连接的上传和下载字节，并标记累计达到 100 MB 的项目。完整配置方法、结果边界和本机分析示例见 [FlClash 代理路由审计说明](./docs/FLCLASH_PROXY_ROUTING_AUDIT.md)。
 
 ## 计划任务管理
 
@@ -88,6 +94,7 @@ tests/
   CPanCleaner.Gui.LogicTests/      GUI 结果解析、选择和后端参数行为测试
 docs/
   SAFETY.md
+  FLCLASH_PROXY_ROUTING_AUDIT.md  FlClash 规则、流量与配置说明
   GUI_ARCHITECTURE.md
   RELEASE.md
 ```
@@ -111,6 +118,7 @@ dotnet build .\CPanCleaner.sln -c Release --no-restore
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Scan -Include Default -Json
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action AnalyzeStorage -AnalysisScope All -Json
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action AuditProxyRouting -Json
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action ReviewDownloads -DryRun -Json
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Migrate -MigrationTarget NuGetPackages -MigrationOperation Prepare -DestinationPath D:\NuGetPackages -DryRun -Json
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CPanCleaner.ps1 -Action Clean -Include WindowsUpdate,DeliveryOptimization -DryRun -Json

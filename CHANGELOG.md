@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.5.0 - 2026-10-19
+
+- Added a read-only FlClash routing audit for system-proxy and TUN configurations, including rule-order checks, APNIC-based China IPv4 classification, and active TCP correlation.
+- Added optional loopback-only Mihomo controller inspection to attribute active domestic proxy traffic by process, host, matched rule, and cumulative upload/download bytes, with a 100 MB large-traffic flag.
+- Added a seven-day APNIC data cache, explicit separation between heuristic candidates and controller-confirmed findings, and configuration guidance that leaves FlClash settings unchanged.
+- Added PowerShell fixtures and GUI argument tests for byte-stream parsing, rule conflicts, connection correlation, traffic aggregation, and read-only invocation behavior.
+
 ## 2.4.2 - 2026-10-03
 
 - Kept `UsoSvc` and Microsoft Store/WinGet dependencies available when disabling automatic Windows Update downloads, and added an explicit restore workflow for policies, services, scheduled tasks, and `WindowsUpdateGuard`.

@@ -1,6 +1,6 @@
 ﻿Set-StrictMode -Version 2.0
 
-$script:CleanerVersion = '2.4.2'
+$script:CleanerVersion = '2.5.0'
 
 function Get-CPanSystemDrive {
     $drive = $env:SystemDrive
@@ -1366,7 +1366,7 @@ function Invoke-CPanNuGetMigration {
             }
             throw
         }
-        $manifest = [pscustomobject]@{ Version='2.4.2'; Source=$source; Destination=$validated.Path; PreviousUserValue=$previousUserValue; SourceBytes=$verification.SourceBytes; SourceCount=$verification.SourceCount; CopyVerified=$true; SourceRemoved=$false; PreparedAt=(Get-Date).ToString('o') }
+        $manifest = [pscustomobject]@{ Version=$script:CleanerVersion; Source=$source; Destination=$validated.Path; PreviousUserValue=$previousUserValue; SourceBytes=$verification.SourceBytes; SourceCount=$verification.SourceCount; CopyVerified=$true; SourceRemoved=$false; PreparedAt=(Get-Date).ToString('o') }
         $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8
         try {
             [Environment]::SetEnvironmentVariable('NUGET_PACKAGES',$validated.Path,'User')
@@ -3335,6 +3335,592 @@ function Invoke-CPanCleanTarget {
     }
 }
 
+function ConvertTo-CPanIpv4Number {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Address
+    )
+
+    $parsed = $null
+    if (-not [System.Net.IPAddress]::TryParse($Address, [ref] $parsed) -or
+        $parsed.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        return $null
+    }
+
+    $bytes = $parsed.GetAddressBytes()
+    return [uint64] $bytes[0] * 16777216 +
+        [uint64] $bytes[1] * 65536 +
+        [uint64] $bytes[2] * 256 +
+        [uint64] $bytes[3]
+}
+
+function ConvertFrom-CPanApnicDelegatedData {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Lines
+    )
+
+    $normalizedLines = if ($Lines -is [byte[]]) {
+        [System.Text.Encoding]::UTF8.GetString($Lines) -split "`r?`n"
+    } elseif ($Lines -is [string]) {
+        $Lines -split "`r?`n"
+    } else {
+        @($Lines)
+    }
+
+    foreach ($line in $normalizedLines) {
+        $parts = $line -split '\|'
+        if ($parts.Count -lt 7 -or
+            $parts[0] -ne 'apnic' -or
+            $parts[1] -ne 'CN' -or
+            $parts[2] -ne 'ipv4') {
+            continue
+        }
+
+        $start = ConvertTo-CPanIpv4Number -Address $parts[3]
+        $count = [uint64] 0
+        if ($null -eq $start -or
+            -not [uint64]::TryParse($parts[4], [ref] $count) -or
+            $count -eq 0) {
+            continue
+        }
+
+        [pscustomobject]@{
+            Start = [uint64] $start
+            End = [uint64] $start + $count - 1
+        }
+    }
+}
+
+function Test-CPanIpv4InRanges {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Address,
+
+        [Parameter(Mandatory = $true)]
+        [object[]] $Ranges
+    )
+
+    $number = ConvertTo-CPanIpv4Number -Address $Address
+    if ($null -eq $number) {
+        return $false
+    }
+
+    foreach ($range in $Ranges) {
+        if ($number -ge [uint64] $range.Start -and $number -le [uint64] $range.End) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-CPanFlClashRuleAudit {
+    param(
+        [string[]] $Rules = @()
+    )
+
+    $rows = @()
+    for ($index = 0; $index -lt $Rules.Count; $index++) {
+        $parts = @([string] $Rules[$index] -split ',')
+        if ($parts.Count -lt 2) {
+            continue
+        }
+
+        $policyIndex = if ($parts[-1].Trim().Equals('no-resolve', [StringComparison]::OrdinalIgnoreCase)) { $parts.Count - 2 } else { $parts.Count - 1 }
+        if ($policyIndex -le 0) {
+            continue
+        }
+
+        $policy = $parts[$policyIndex].Trim()
+        $rows += [pscustomobject]@{
+            Index = $index
+            Type = $parts[0].Trim().ToUpperInvariant()
+            Target = if ($parts.Count -gt 1) { $parts[1].Trim().ToLowerInvariant() } else { '' }
+            Policy = $policy
+            IsDirect = $policy.Equals('DIRECT', [StringComparison]::OrdinalIgnoreCase)
+            IsProxy = $policy -notmatch '^(?i:DIRECT|REJECT|REJECT-DROP|REJECT-TINYGIF|PASS)$'
+        }
+    }
+
+    $chinaDirectRows = @($rows | Where-Object {
+        $_.IsDirect -and
+        $_.Target -eq 'cn' -and
+        $_.Type -in @('GEOIP', 'GEOSITE')
+    })
+    $firstChinaDirectIndex = if ($chinaDirectRows.Count -gt 0) {
+        [int] ($chinaDirectRows | Sort-Object Index | Select-Object -First 1).Index
+    } else {
+        -1
+    }
+    $proxyRows = @($rows | Where-Object IsProxy)
+    $firstProxyIndex = if ($proxyRows.Count -gt 0) {
+        [int] ($proxyRows | Sort-Object Index | Select-Object -First 1).Index
+    } else {
+        [int]::MaxValue
+    }
+    $geositeChinaIndex = @($chinaDirectRows | Where-Object Type -eq 'GEOSITE' | Sort-Object Index | Select-Object -First 1)
+
+    $domainRows = @($rows | Where-Object { $_.Type -match '^DOMAIN' -and -not [string]::IsNullOrWhiteSpace($_.Target) })
+    $conflicts = @($domainRows | Group-Object Target | Where-Object {
+        @($_.Group | Where-Object IsDirect).Count -gt 0 -and
+        @($_.Group | Where-Object IsProxy).Count -gt 0
+    })
+
+    return [pscustomobject]@{
+        RuleCount = $Rules.Count
+        FirstChinaDirectIndex = $firstChinaDirectIndex
+        ProxyRulesBeforeChinaDirect = if ($firstChinaDirectIndex -ge 0) { @($proxyRows | Where-Object Index -lt $firstChinaDirectIndex).Count } else { $proxyRows.Count }
+        ExactProxyDirectConflicts = $conflicts.Count
+        HasGeositeChinaDirectBeforeProxy = $geositeChinaIndex.Count -gt 0 -and [int] $geositeChinaIndex[0].Index -lt $firstProxyIndex
+    }
+}
+
+function Get-CPanFlClashSuspectedDomesticProxyFlows {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]] $Connections,
+
+        [Parameter(Mandatory = $true)]
+        [int] $CoreProcessId,
+
+        [Parameter(Mandatory = $true)]
+        [object[]] $Ranges
+    )
+
+    $directAddresses = @($Connections | Where-Object {
+        [int] $_.OwningProcess -eq $CoreProcessId -and
+        ([string] $_.State).Equals('Established', [StringComparison]::OrdinalIgnoreCase) -and
+        [string] $_.LocalAddress -notmatch '^(127\.|::1$|198\.(18|19)\.)'
+    } | Select-Object -ExpandProperty RemoteAddress -Unique)
+
+    foreach ($connection in $Connections) {
+        $processId = [int] $connection.OwningProcess
+        $remoteAddress = [string] $connection.RemoteAddress
+        if ($processId -in @(0, 4, $CoreProcessId) -or
+            -not ([string] $connection.State).Equals('Established', [StringComparison]::OrdinalIgnoreCase) -or
+            [string] $connection.LocalAddress -notmatch '^198\.(18|19)\.' -or
+            $remoteAddress -in $directAddresses -or
+            -not (Test-CPanIpv4InRanges -Address $remoteAddress -Ranges $Ranges)) {
+            continue
+        }
+
+        [pscustomobject]@{
+            ProcessId = $processId
+            ProcessName = [string] $connection.ProcessName
+            RemoteAddress = $remoteAddress
+            RemotePort = if ($connection.PSObject.Properties.Match('RemotePort').Count -gt 0) { $connection.RemotePort } else { $null }
+            Evidence = 'NoMatchingDirectCoreConnection'
+        }
+    }
+}
+
+function Get-CPanObjectPropertyValue {
+    param(
+        [object] $InputObject,
+        [Parameter(Mandatory = $true)]
+        [string] $Name,
+        [object] $DefaultValue = $null
+    )
+
+    if ($null -eq $InputObject) {
+        return $DefaultValue
+    }
+    $property = $InputObject.PSObject.Properties | Where-Object {
+        $_.Name.Equals($Name, [StringComparison]::OrdinalIgnoreCase)
+    } | Select-Object -First 1
+    if ($null -eq $property) {
+        return $DefaultValue
+    }
+    return $property.Value
+}
+
+function Get-CPanFlClashControllerTrafficFindings {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Snapshot,
+
+        [Parameter(Mandatory = $true)]
+        [object[]] $Ranges,
+
+        [int64] $LargeTrafficBytes = 100MB
+    )
+
+    $connections = @(Get-CPanObjectPropertyValue -InputObject $Snapshot -Name 'connections' -DefaultValue @())
+    $proxiedChinaConnections = @()
+    foreach ($connection in $connections) {
+        $metadata = Get-CPanObjectPropertyValue -InputObject $connection -Name 'metadata'
+        $chains = @(Get-CPanObjectPropertyValue -InputObject $connection -Name 'chains' -DefaultValue @())
+        if (@($chains | Where-Object { ([string] $_).Equals('DIRECT', [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) {
+            continue
+        }
+
+        $geo = Get-CPanObjectPropertyValue -InputObject $metadata -Name 'destinationGeoIP'
+        $countryCode = [string] (Get-CPanObjectPropertyValue -InputObject $geo -Name 'countryCode' -DefaultValue '')
+        $destinationIp = [string] (Get-CPanObjectPropertyValue -InputObject $metadata -Name 'remoteDestination' -DefaultValue '')
+        if ([string]::IsNullOrWhiteSpace($destinationIp)) {
+            $destinationIp = [string] (Get-CPanObjectPropertyValue -InputObject $metadata -Name 'destinationIP' -DefaultValue '')
+        }
+        if ($destinationIp.Contains(':') -and $destinationIp -match '^\d+\.\d+\.\d+\.\d+:\d+$') {
+            $destinationIp = $destinationIp.Substring(0, $destinationIp.LastIndexOf(':'))
+        }
+
+        $isChina = $countryCode.Equals('CN', [StringComparison]::OrdinalIgnoreCase) -or
+            (Test-CPanIpv4InRanges -Address $destinationIp -Ranges $Ranges)
+        if (-not $isChina) {
+            continue
+        }
+
+        $download = [int64] (Get-CPanObjectPropertyValue -InputObject $connection -Name 'download' -DefaultValue 0)
+        $upload = [int64] (Get-CPanObjectPropertyValue -InputObject $connection -Name 'upload' -DefaultValue 0)
+        $host = [string] (Get-CPanObjectPropertyValue -InputObject $metadata -Name 'host' -DefaultValue '')
+        $processName = [string] (Get-CPanObjectPropertyValue -InputObject $metadata -Name 'process' -DefaultValue '')
+        $rule = [string] (Get-CPanObjectPropertyValue -InputObject $connection -Name 'rule' -DefaultValue '')
+        $rulePayload = [string] (Get-CPanObjectPropertyValue -InputObject $connection -Name 'rulePayload' -DefaultValue '')
+        $proxiedChinaConnections += [pscustomobject]@{
+            Host = if ([string]::IsNullOrWhiteSpace($host)) { $destinationIp } else { $host }
+            DestinationIp = $destinationIp
+            ProcessName = if ([string]::IsNullOrWhiteSpace($processName)) { '<unknown>' } else { $processName }
+            Rule = $rule
+            RulePayload = $rulePayload
+            DownloadBytes = $download
+            UploadBytes = $upload
+        }
+    }
+
+    foreach ($group in $proxiedChinaConnections | Group-Object {
+        '{0}|{1}|{2}|{3}' -f $_.ProcessName, $_.Host, $_.Rule, $_.RulePayload
+    }) {
+        $first = $group.Group[0]
+        $downloadBytes = [int64] (($group.Group | Measure-Object DownloadBytes -Sum).Sum)
+        $uploadBytes = [int64] (($group.Group | Measure-Object UploadBytes -Sum).Sum)
+        $totalBytes = $downloadBytes + $uploadBytes
+        [pscustomobject]@{
+            ProcessName = $first.ProcessName
+            Host = $first.Host
+            DestinationIp = $first.DestinationIp
+            Rule = $first.Rule
+            RulePayload = $first.RulePayload
+            ConnectionCount = $group.Count
+            DownloadBytes = $downloadBytes
+            UploadBytes = $uploadBytes
+            TotalBytes = $totalBytes
+            IsLarge = $totalBytes -ge $LargeTrafficBytes
+        }
+    }
+}
+
+function Get-CPanFlClashDataRoot {
+    $applicationData = [Environment]::GetFolderPath('ApplicationData')
+    foreach ($relativePath in @('com.follow\clash', 'com.follow\flclash')) {
+        $candidate = Join-Path $applicationData $relativePath
+        if (Test-Path -LiteralPath $candidate -PathType Container) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
+function Get-CPanNetstatTcpConnections {
+    $parsed = @()
+    foreach ($line in & netstat.exe -ano -p TCP 2>$null) {
+        if ($line -notmatch '^\s*TCP\s+(?<local>\S+)\s+(?<remote>\S+)\s+(?<state>\S+)\s+(?<pid>\d+)\s*$') {
+            continue
+        }
+
+        $localEndpoint = $Matches.local
+        $remoteEndpoint = $Matches.remote
+        $localAddress = if ($localEndpoint.StartsWith('[')) {
+            $localEndpoint.Substring(1, $localEndpoint.IndexOf(']') - 1)
+        } else {
+            $localEndpoint.Substring(0, $localEndpoint.LastIndexOf(':'))
+        }
+        $remoteAddress = if ($remoteEndpoint.StartsWith('[')) {
+            $remoteEndpoint.Substring(1, $remoteEndpoint.IndexOf(']') - 1)
+        } else {
+            $remoteEndpoint.Substring(0, $remoteEndpoint.LastIndexOf(':'))
+        }
+        $remotePortText = $remoteEndpoint.Substring($remoteEndpoint.LastIndexOf(':') + 1)
+        $remotePort = 0
+        [void] [int]::TryParse($remotePortText, [ref] $remotePort)
+        $parsed += [pscustomobject]@{
+            LocalAddress = $localAddress
+            RemoteAddress = $remoteAddress
+            RemotePort = $remotePort
+            State = $Matches.state
+            OwningProcess = [int] $Matches.pid
+            ProcessName = ''
+        }
+    }
+
+    $processNames = @{}
+    foreach ($processId in @($parsed | Select-Object -ExpandProperty OwningProcess -Unique)) {
+        if ($processId -le 0) {
+            continue
+        }
+        $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if ($process) {
+            $processNames[$processId] = $process.ProcessName
+        }
+    }
+    foreach ($connection in $parsed) {
+        if ($processNames.ContainsKey([int] $connection.OwningProcess)) {
+            $connection.ProcessName = [string] $processNames[[int] $connection.OwningProcess]
+        }
+    }
+    return $parsed
+}
+
+function Get-CPanApnicChinaIpv4Ranges {
+    param(
+        [string[]] $DelegatedLines
+    )
+
+    if ($PSBoundParameters.ContainsKey('DelegatedLines')) {
+        return @(ConvertFrom-CPanApnicDelegatedData -Lines $DelegatedLines)
+    }
+
+    $cacheDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CPanCleaner\network-data'
+    $cachePath = Join-Path $cacheDirectory 'delegated-apnic-latest'
+    $cacheItem = Get-Item -LiteralPath $cachePath -ErrorAction SilentlyContinue
+    if ($null -ne $cacheItem -and $cacheItem.LastWriteTime -ge (Get-Date).AddDays(-7)) {
+        $cachedRanges = @(ConvertFrom-CPanApnicDelegatedData -Lines ([System.IO.File]::ReadAllBytes($cachePath)))
+        if ($cachedRanges.Count -ge 100) {
+            return $cachedRanges
+        }
+    }
+
+    $previousProgressPreference = $ProgressPreference
+    try {
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            $response = Invoke-WebRequest `
+                -Uri 'https://ftp.apnic.net/apnic/stats/apnic/delegated-apnic-latest' `
+                -UseBasicParsing `
+                -TimeoutSec 30 `
+                -ErrorAction Stop
+            $ranges = @(ConvertFrom-CPanApnicDelegatedData -Lines $response.Content)
+            if ($ranges.Count -lt 100) {
+                throw "APNIC response contained only $($ranges.Count) China IPv4 ranges."
+            }
+
+            try {
+                $null = New-Item -ItemType Directory -Path $cacheDirectory -Force
+                if ($response.Content -is [byte[]]) {
+                    [System.IO.File]::WriteAllBytes($cachePath, $response.Content)
+                } else {
+                    [System.IO.File]::WriteAllText($cachePath, [string] $response.Content, (New-Object System.Text.UTF8Encoding($false)))
+                }
+            } catch {
+                Write-Verbose "Unable to cache APNIC delegated data: $($_.Exception.Message)"
+            }
+            return $ranges
+        } catch {
+            if ($null -ne $cacheItem) {
+                $staleRanges = @(ConvertFrom-CPanApnicDelegatedData -Lines ([System.IO.File]::ReadAllBytes($cachePath)))
+                if ($staleRanges.Count -ge 100) {
+                    return $staleRanges
+                }
+            }
+            throw
+        }
+    } finally {
+        $ProgressPreference = $previousProgressPreference
+    }
+}
+
+function Get-CPanFlClashControllerSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Controller,
+        [string] $Secret
+    )
+
+    $controllerText = $Controller.Trim()
+    if ($controllerText -match '^(0\.0\.0\.0|\*):(?<port>\d+)$') {
+        $controllerText = "127.0.0.1:$($Matches.port)"
+    }
+    if ($controllerText -notmatch '^(?i:https?://)') {
+        $controllerText = "http://$controllerText"
+    }
+    $uri = [uri] $controllerText
+    if ($uri.Host -notin @('127.0.0.1', 'localhost', '::1')) {
+        throw 'For safety, CPanCleaner only queries a loopback FlClash external controller.'
+    }
+
+    $headers = @{}
+    if (-not [string]::IsNullOrWhiteSpace($Secret)) {
+        $headers.Authorization = "Bearer $Secret"
+    }
+    return Invoke-RestMethod -Method Get -Uri ($controllerText.TrimEnd('/') + '/connections') -Headers $headers -TimeoutSec 8 -ErrorAction Stop
+}
+
+function Get-CPanFlClashRoutingAudit {
+    [CmdletBinding()]
+    param(
+        [string] $DataRoot,
+        [string[]] $DelegatedLines,
+        [object[]] $Connections,
+        [int] $CoreProcessId = 0,
+        [int64] $LargeTrafficBytes = 100MB
+    )
+
+    $findings = @()
+    if ([string]::IsNullOrWhiteSpace($DataRoot)) {
+        $DataRoot = Get-CPanFlClashDataRoot
+    }
+    if ([string]::IsNullOrWhiteSpace($DataRoot) -or -not (Test-Path -LiteralPath $DataRoot -PathType Container)) {
+        return @([pscustomobject]@{
+            Type = 'FlClashState'; Severity = 'Info'; Status = 'NotInstalled'; Name = 'FlClash'
+            Id = $null; Message = '未找到 FlClash 用户配置目录。'; Detail = '%APPDATA%\com.follow\clash'
+        })
+    }
+
+    $configPath = Join-Path $DataRoot 'config.json'
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        return @([pscustomobject]@{
+            Type = 'FlClashState'; Severity = 'Warning'; Status = 'ConfigMissing'; Name = 'FlClash'
+            Id = $null; Message = '已找到 FlClash 数据目录，但缺少 config.json。'; Detail = $DataRoot
+        })
+    }
+
+    try {
+        $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return @([pscustomobject]@{
+            Type = 'FlClashState'; Severity = 'Warning'; Status = 'ConfigInvalid'; Name = 'FlClash'
+            Id = $null; Message = '无法解析 FlClash config.json。'; Detail = $_.Exception.Message
+        })
+    }
+
+    $systemProxy = $null
+    $vpnEnabled = $null
+    $preferencesPath = Join-Path $DataRoot 'shared_preferences.json'
+    if (Test-Path -LiteralPath $preferencesPath -PathType Leaf) {
+        try {
+            $outerPreferences = Get-Content -LiteralPath $preferencesPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+            $serializedPreferences = [string] (Get-CPanObjectPropertyValue -InputObject $outerPreferences -Name 'flutter.config' -DefaultValue '')
+            if (-not [string]::IsNullOrWhiteSpace($serializedPreferences)) {
+                $preferences = $serializedPreferences | ConvertFrom-Json -ErrorAction Stop
+                $networkProps = Get-CPanObjectPropertyValue -InputObject $preferences -Name 'networkProps'
+                $vpnProps = Get-CPanObjectPropertyValue -InputObject $preferences -Name 'vpnProps'
+                $systemProxy = Get-CPanObjectPropertyValue -InputObject $networkProps -Name 'systemProxy'
+                $vpnEnabled = Get-CPanObjectPropertyValue -InputObject $vpnProps -Name 'enable'
+            }
+        } catch {
+            $findings += [pscustomobject]@{
+                Type = 'FlClashState'; Severity = 'Warning'; Status = 'PreferencesInvalid'; Name = 'FlClash preferences'
+                Id = $null; Message = '无法解析 FlClash 界面配置，仍继续分析运行配置。'; Detail = $_.Exception.Message
+            }
+        }
+    }
+
+    $runningCore = @(Get-Process -Name 'FlClashCore' -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($CoreProcessId -le 0 -and $runningCore.Count -gt 0) {
+        $CoreProcessId = $runningCore[0].Id
+    }
+    $findings += [pscustomobject]@{
+        Type = 'FlClashState'; Severity = 'Info'; Status = if ($CoreProcessId -gt 0) { 'Running' } else { 'Stopped' }; Name = 'FlClash'
+        Id = if ($CoreProcessId -gt 0) { $CoreProcessId } else { $null }
+        Message = '已读取 FlClash 的本地运行与接管模式。'
+        Detail = "SystemProxy=$systemProxy; VPN/TUN=$vpnEnabled; Mode=$([string](Get-CPanObjectPropertyValue -InputObject $config -Name 'mode' -DefaultValue 'unknown')); DataRoot=$DataRoot"
+    }
+
+    $rules = @(Get-CPanObjectPropertyValue -InputObject $config -Name 'rule' -DefaultValue @())
+    $ruleAudit = Get-CPanFlClashRuleAudit -Rules $rules
+    $findings += [pscustomobject]@{
+        Type = 'ProxyRuleAudit'
+        Severity = if ($ruleAudit.ProxyRulesBeforeChinaDirect -gt 0 -and -not $ruleAudit.HasGeositeChinaDirectBeforeProxy) { 'Warning' } else { 'Info' }
+        Status = if ($ruleAudit.HasGeositeChinaDirectBeforeProxy) { 'ChinaDirectFirst' } else { 'ProxyRulesFirst' }
+        Name = 'FlClash rule order'
+        Id = $null
+        Message = if ($ruleAudit.ProxyRulesBeforeChinaDirect -gt 0) { '部分代理规则位于中国直连规则之前，命中后不会继续执行 GEOIP,CN,DIRECT。' } else { '未发现位于中国直连规则之前的代理规则。' }
+        Detail = "Rules=$($ruleAudit.RuleCount); FirstChinaDirectIndex=$($ruleAudit.FirstChinaDirectIndex); ProxyBeforeChinaDirect=$($ruleAudit.ProxyRulesBeforeChinaDirect); ExactProxyDirectConflicts=$($ruleAudit.ExactProxyDirectConflicts)"
+    }
+
+    $ranges = @()
+    try {
+        if ($PSBoundParameters.ContainsKey('DelegatedLines')) {
+            $ranges = @(Get-CPanApnicChinaIpv4Ranges -DelegatedLines $DelegatedLines)
+        } else {
+            $ranges = @(Get-CPanApnicChinaIpv4Ranges)
+        }
+        $findings += [pscustomobject]@{
+            Type = 'ProxyRoutingData'; Severity = 'Info'; Status = 'Loaded'; Name = 'APNIC China IPv4 ranges'
+            Id = $null; Message = '已加载 APNIC 中国 IPv4 分配数据用于本地地址归类。'; Detail = "RangeCount=$($ranges.Count); Source=https://ftp.apnic.net/apnic/stats/apnic/delegated-apnic-latest"
+        }
+    } catch {
+        $findings += [pscustomobject]@{
+            Type = 'ProxyRoutingData'; Severity = 'Warning'; Status = 'Unavailable'; Name = 'APNIC China IPv4 ranges'
+            Id = $null; Message = '无法加载 APNIC 数据，跳过基于 IP 的国内流量启发式分析。'; Detail = $_.Exception.Message
+        }
+    }
+
+    if ($ranges.Count -gt 0 -and $CoreProcessId -gt 0) {
+        if (-not $PSBoundParameters.ContainsKey('Connections')) {
+            $Connections = @(Get-CPanNetstatTcpConnections)
+        }
+        $suspected = @(Get-CPanFlClashSuspectedDomesticProxyFlows -Connections @($Connections) -CoreProcessId $CoreProcessId -Ranges $ranges)
+        foreach ($group in $suspected | Group-Object ProcessId,ProcessName) {
+            $sample = $group.Group[0]
+            $addresses = @($group.Group | Select-Object -ExpandProperty RemoteAddress -Unique)
+            $findings += [pscustomobject]@{
+                Type = 'ProxyRoutingCandidate'; Severity = 'Warning'; Status = 'SuspectedProxy'; Name = $sample.ProcessName
+                Id = $sample.ProcessId
+                Message = '发现国内 IP 的 TUN 应用连接，但没有同时找到同目标的 FlClashCore 直连出口；该结果是启发式疑似项。'
+                Detail = "Connections=$($group.Count); DestinationIPs=$(@($addresses | Select-Object -First 12) -join ',')"
+            }
+        }
+        if ($suspected.Count -eq 0) {
+            $findings += [pscustomobject]@{
+                Type = 'ProxyRoutingCandidate'; Severity = 'Info'; Status = 'NoneObserved'; Name = 'Active TCP flows'
+                Id = $null; Message = '当前快照未发现国内 TCP 连接缺少对应直连出口。'; Detail = '启发式快照不包含已经结束的连接或 UDP。'
+            }
+        }
+    }
+
+    $controller = [string] (Get-CPanObjectPropertyValue -InputObject $config -Name 'external-controller' -DefaultValue '')
+    if ([string]::IsNullOrWhiteSpace($controller)) {
+        $findings += [pscustomobject]@{
+            Type = 'FlClashController'; Severity = 'Warning'; Status = 'Disabled'; Name = 'External controller'
+            Id = $null; Message = '外部控制器未开启，无法按域名、命中规则和累计字节给出确定结论。'; Detail = '在 FlClash 的“工具 → 覆写 → 基础 → 外部控制器”开启仅回环的 127.0.0.1:9090 后重跑。'
+        }
+    } else {
+        try {
+            $secret = [string] (Get-CPanObjectPropertyValue -InputObject $config -Name 'secret' -DefaultValue '')
+            $snapshot = Get-CPanFlClashControllerSnapshot -Controller $controller -Secret $secret
+            $trafficFindings = @(Get-CPanFlClashControllerTrafficFindings -Snapshot $snapshot -Ranges $ranges -LargeTrafficBytes $LargeTrafficBytes | Sort-Object TotalBytes -Descending)
+            foreach ($traffic in $trafficFindings | Select-Object -First 50) {
+                $findings += [pscustomobject]@{
+                    Type = 'DomesticProxyTraffic'; Severity = if ($traffic.IsLarge) { 'Warning' } else { 'Info' }; Status = if ($traffic.IsLarge) { 'Large' } else { 'Observed' }; Name = $traffic.Host
+                    Id = $null
+                    Message = "国内目标通过代理链传输：$($traffic.ProcessName)，累计 $(Format-CPanBytes $traffic.TotalBytes)。"
+                    Detail = "DestinationIP=$($traffic.DestinationIp); Connections=$($traffic.ConnectionCount); Download=$($traffic.DownloadBytes); Upload=$($traffic.UploadBytes); Rule=$($traffic.Rule); RulePayload=$($traffic.RulePayload)"
+                }
+            }
+            if ($trafficFindings.Count -eq 0) {
+                $findings += [pscustomobject]@{
+                    Type = 'DomesticProxyTraffic'; Severity = 'Info'; Status = 'NoneObserved'; Name = 'Active controller connections'
+                    Id = $null; Message = '控制器当前没有报告经代理链传输的国内活动连接。'; Detail = '这里只统计当前仍活动的连接。'
+                }
+            }
+        } catch {
+            $findings += [pscustomobject]@{
+                Type = 'FlClashController'; Severity = 'Warning'; Status = 'Unavailable'; Name = 'External controller'
+                Id = $null; Message = '外部控制器已配置，但连接统计读取失败。'; Detail = $_.Exception.Message
+            }
+        }
+    }
+
+    if (-not $ruleAudit.HasGeositeChinaDirectBeforeProxy) {
+        $findings += [pscustomobject]@{
+            Type = 'ProxyRoutingAdvice'; Severity = 'Info'; Status = 'Recommended'; Name = 'GEOSITE,CN,DIRECT'
+            Id = $null; Message = '建议在当前配置的“进阶配置 → 附加规则”新增 GEOSITE,CN,DIRECT；FlClash 会把附加规则放在订阅规则之前。'; Detail = '先启用外部控制器核对命中域名和字节，再从大流量域名做小范围直连；不要直接编辑会被重建的 config.json。'
+        }
+    }
+
+    return $findings
+}
+
 function Get-CPanDiagnostics {
     param(
         [string] $RepositoryPath
@@ -3453,7 +4039,7 @@ function Get-CPanDiagnostics {
 function Invoke-CPanCleaner {
     [CmdletBinding()]
     param(
-        [ValidateSet('Scan', 'Clean', 'AnalyzeStorage', 'ReviewDownloads', 'Migrate', 'Diagnose', 'DisableWindowsUpdate', 'RestoreWindowsUpdate', 'OptimizePerformance', 'PreventPerformanceSpikes', 'ManageGuard', 'RepairRunHistory')]
+        [ValidateSet('Scan', 'Clean', 'AnalyzeStorage', 'ReviewDownloads', 'Migrate', 'Diagnose', 'AuditProxyRouting', 'DisableWindowsUpdate', 'RestoreWindowsUpdate', 'OptimizePerformance', 'PreventPerformanceSpikes', 'ManageGuard', 'RepairRunHistory')]
         [string] $Action = 'Scan',
 
         [string[]] $Include = @('Default'),
@@ -3505,6 +4091,8 @@ function Invoke-CPanCleaner {
         $items = @(Invoke-CPanNuGetMigration -Context $context -MigrationOperation $MigrationOperation -DestinationPath $DestinationPath -Apply:$effectiveApply)
     } elseif ($Action -eq 'Diagnose') {
         $diagnostics = @(Get-CPanDiagnostics -RepositoryPath $RepositoryPath)
+    } elseif ($Action -eq 'AuditProxyRouting') {
+        $diagnostics = @(Get-CPanFlClashRoutingAudit)
     } elseif ($Action -eq 'DisableWindowsUpdate') {
         $diagnostics = @(Invoke-CPanDisableWindowsUpdateDownloads -Context $context -Apply:$effectiveApply -IsAdmin $isAdmin)
     } elseif ($Action -eq 'RestoreWindowsUpdate') {
@@ -3594,6 +4182,12 @@ Export-ModuleMember -Function @(
     'Test-CPanPathSafety',
     'ConvertTo-CPanFullPath',
     'ConvertFrom-CPanDiskUsageCsv',
+    'ConvertFrom-CPanApnicDelegatedData',
+    'Test-CPanIpv4InRanges',
+    'Get-CPanFlClashRuleAudit',
+    'Get-CPanFlClashSuspectedDomesticProxyFlows',
+    'Get-CPanFlClashControllerTrafficFindings',
+    'Get-CPanFlClashRoutingAudit',
     'Measure-CPanPathSizeOnDisk',
     'Test-CPanDownloadFileSafety',
     'Invoke-CPanDownloadReview',

@@ -130,6 +130,37 @@ Run("分析页预览仍保持只读", () =>
     False(arguments.Contains("-Apply"), "只读预览不能传递 -Apply");
 });
 
+Run("代理路由审计不附加清理参数", () =>
+{
+    var buildArguments = typeof(CleanerBackend).GetMethod("BuildArguments", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("找不到 CleanerBackend.BuildArguments。 ");
+    var feature = new CleanerFeature
+    {
+        Id = "proxy-routing-audit",
+        Action = "AuditProxyRouting",
+        OperationKind = "Diagnostic"
+    };
+    var arguments = (IReadOnlyList<string>?)buildArguments.Invoke(
+        null,
+        new object?[]
+        {
+            feature,
+            false,
+            1,
+            "CPanCleaner.ps1",
+            "result.json",
+            null,
+            15,
+            null,
+            Array.Empty<string>(),
+            Array.Empty<string>()
+        }) ?? throw new InvalidOperationException("BuildArguments 未返回参数。 ");
+
+    Equal("AuditProxyRouting", ValueAfter(arguments, "-Action"), "应调用代理路由审计动作");
+    False(arguments.Contains("-Apply"), "代理路由审计不能传递 -Apply");
+    False(arguments.Contains("-DryRun"), "代理路由审计是纯诊断动作，不应伪装成清理预览");
+});
+
 if (failures.Count > 0)
 {
     Console.Error.WriteLine($"GUI logic tests failed: {failures.Count}");

@@ -6,6 +6,7 @@ $requiredFiles = @(
     'CHANGELOG.md',
     'docs\SAFETY.md',
     'docs\RELEASE.md',
+    'docs\FLCLASH_PROXY_ROUTING_AUDIT.md',
     'docs\WINDOWS_WIDGETS.md',
     'tests\Invoke-StaticTests.ps1',
     'tests\CPanCleaner.Gui.LogicTests\CPanCleaner.Gui.LogicTests.csproj',

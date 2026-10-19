@@ -272,6 +272,7 @@ public sealed class CleanerBackend
             arguments.Add("-Apply");
         }
         else if (!effectiveAction.Equals("Diagnose", StringComparison.OrdinalIgnoreCase) &&
+                 !effectiveAction.Equals("AuditProxyRouting", StringComparison.OrdinalIgnoreCase) &&
                  !(feature.SupportsSchedule && string.Equals(guardOperation, "Status", StringComparison.OrdinalIgnoreCase)))
         {
             arguments.Add("-DryRun");

@@ -53,9 +53,9 @@ dotnet publish .\src\CPanCleaner.Gui\CPanCleaner.Gui.csproj -c Release -r win-x6
 目标电脑没有 .NET Desktop Runtime 时：
 
 ```powershell
-dotnet publish .\src\CPanCleaner.Gui\CPanCleaner.Gui.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o .\dist\CPanCleaner-2.4.2-win-x64
-Compress-Archive -Path .\dist\CPanCleaner-2.4.2-win-x64\* -DestinationPath .\dist\CPanCleaner-2.4.2-win-x64.zip
-Get-FileHash .\dist\CPanCleaner-2.4.2-win-x64.zip -Algorithm SHA256
+dotnet publish .\src\CPanCleaner.Gui\CPanCleaner.Gui.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o .\dist\CPanCleaner-2.5.0-win-x64
+Compress-Archive -Path .\dist\CPanCleaner-2.5.0-win-x64\* -DestinationPath .\dist\CPanCleaner-2.5.0-win-x64.zip
+Get-FileHash .\dist\CPanCleaner-2.5.0-win-x64.zip -Algorithm SHA256
 ```
 
 即使启用 `PublishSingleFile`，`Resources` 和 `backend` 仍是独立内容文件，这是为了让风险说明与系统脚本可审计、可更新。
